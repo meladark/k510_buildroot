@@ -2,6 +2,11 @@
 #set -x
 #echo "$MDEV $ACTION"
 
+# Never fsck/remount the partition we are running from: fsck on a mounted,
+# writable ext2 root corrupts it (files silently disappear after "mdev -s").
+root_dev=$(sed -n 's#.*root=\(/dev/[^ ]*\).*#\1#p' /proc/cmdline)
+[ "/dev/${MDEV}" = "${root_dev}" ] && exit 0
+
 
 if [ "${MDEV:6:1}" =  "0" ];then
 	if [ "${MDEV:8:1}" = "1" ]; then exit ;fi; #emmc part 1 can not mount;

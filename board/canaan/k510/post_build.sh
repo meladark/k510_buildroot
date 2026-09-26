@@ -10,6 +10,15 @@ ver="${last_tag}-${commitid}-$(date "+%Y%m%d-%H%M%S%Z")-$(whoami)-$(hostname)"
 echo -e "#############SDK VERSION######################################" >${TARGET_DIR}/etc/version/release_version
 echo -e ${ver} >> ${TARGET_DIR}/etc/version/release_version
 echo -e "##############################################################" >>${TARGET_DIR}/etc/version/release_version
+
+# sshd: key-only login, StrictModes-compatible permissions
+if [ -f ${TARGET_DIR}/etc/ssh/sshd_config ]; then
+	sed -i -e 's/^#\?PasswordAuthentication .*/PasswordAuthentication no/' \
+		-e 's/^#\?PermitRootLogin .*/PermitRootLogin prohibit-password/' \
+		${TARGET_DIR}/etc/ssh/sshd_config
+	chmod 700 ${TARGET_DIR}/root ${TARGET_DIR}/root/.ssh
+	chmod 600 ${TARGET_DIR}/root/.ssh/authorized_keys
+fi
 exit 0
 
 

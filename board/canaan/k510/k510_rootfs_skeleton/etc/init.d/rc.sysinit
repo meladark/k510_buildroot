@@ -83,6 +83,8 @@ if [ $? -eq 0 ];then
         fi
 
         wpa_supplicant -D nl80211 -i wlan0 -c /etc/wpa_supplicant.conf -B
+        # DHCP on wlan0 whenever wpa_supplicant (re)connects
+        wpa_cli -i wlan0 -a /etc/wpa_action.sh -B
 fi
 
 /sbin/ifup -a -f
@@ -99,22 +101,35 @@ fi
 #echo $IPV4 >> /etc/hosts
 #echo $IPV6 >> /etc/hosts
 
-# enable telnet service at sysinit
 mkdir /dev/pts
-mount -t devpts devpts /dev/pts 
-telnetd
+mount -t devpts devpts /dev/pts
+
+# ssh/sftp/rsync (key-only); host keys are generated on first boot
+ssh-keygen -A
+/usr/sbin/sshd
 
 
 cd /etc/init.d
 sh ./get_version.sh
 cd /
 
-ntpdate  ntp.aliyun.com >/dev/null 2>&1 &
+# time: RTC first, then NTP once any network is up (keeps retrying), then back to RTC
+hwclock -s 2>/dev/null
+(
+	n=0
+	while [ $n -lt 240 ]; do
+		if ntpdate pool.ntp.org >/dev/null 2>&1 || ntpdate ntp.aliyun.com >/dev/null 2>&1; then
+			hwclock -w 2>/dev/null
+			break
+		fi
+		n=$((n + 1))
+		sleep 30
+	done
+) &
 /app/dsp_log/dsp_log &
 
 i2ctransfer -f -y 0 w3@0x10 0x01 0x00 0x00
 
-cd /app/mediactl_lib/
-./v4l2_drm.out -f video_drm_1920x1080.conf -e 1 -s &
-cd /
+# camera view + AI now comes from /etc/init.d/parking (started from inittab
+# after run.sh has mounted /root/data)
 /usr/sbin/ifplugd -d 0 -u 0 -n -p  -I -i eth0 -r /etc/network/ifplug.sh &

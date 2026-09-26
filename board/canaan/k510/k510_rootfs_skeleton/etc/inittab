@@ -4,8 +4,12 @@
 # run gettys on the serial ports
 ::respawn:-/sbin/getty -n -L ttyS0 115200 vt100 -l usr/autologin.profile
 ttyS0::sysinit:etc/init.d/run.sh
+# launcher: runs the selected camera app, touch menu, Wi-Fi setup;
+# needs /root/data, which run.sh mounts
+::sysinit:/etc/init.d/launcher start
 
 # stuff to do before rebooting
 ::ctrlaltdel:/etc/init.d/reboot
+::shutdown:/etc/init.d/launcher stop
 ::shutdown:/bin/umount -a -r
 ::shutdown:/sbin/swapoff -a
