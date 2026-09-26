@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>K510 Парковка</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>K510 Парковка</h1>
+  <div id="summary" class="summary">…</div>
+  <a id="apps-link" class="summary" href="#">Приложения ↗</a>
+</header>
+<nav>
+  <button data-tab="status" class="active">Статус</button>
+  <button data-tab="spots">Места</button>
+  <button data-tab="photos">Фото</button>
+  <button data-tab="net">Сеть</button>
+  <button data-tab="settings">Настройки</button>
+</nav>
+<div id="msg" class="msg hidden"></div>
+
+<main>
+<!-- STATUS -->
+<section id="tab-status">
+  <div class="cams" id="status-cams"></div>
+  <h2>Места</h2>
+  <p class="hint">Если система ошиблась — нажмите правильный вариант. Это сохранится как разметка вместе с фото для дообучения.</p>
+  <table class="spots-table">
+    <thead><tr><th>Место</th><th>Камера</th><th>Статус</th><th>Перекрытие</th><th>С</th><th>Исправить</th></tr></thead>
+    <tbody id="spots-body"></tbody>
+  </table>
+</section>
+
+<!-- SPOT EDITOR -->
+<section id="tab-spots" class="hidden">
+  <div class="toolbar">
+    <label>Камера <select id="ed-cam"><option value="0">0</option><option value="1">1</option></select></label>
+    <button id="ed-refresh">Обновить кадр</button>
+    <button id="ed-undo" title="Backspace">Отменить точку</button>
+    <button id="ed-close">Замкнуть контур</button>
+    <button id="ed-delete" disabled>Удалить выбранное</button>
+    <button id="ed-rename" disabled>Переименовать</button>
+    <button id="ed-save" class="primary">Сохранить</button>
+  </div>
+  <p class="hint">Кликайте по углам парковочного места (обычно 4 точки), двойной клик или «Замкнуть контур» завершает место.
+     Клик по готовому месту выделяет его; углы можно перетаскивать.</p>
+  <div class="editor-wrap"><canvas id="ed-canvas"></canvas></div>
+  <p id="ed-info" class="hint"></p>
+</section>
+
+<!-- PHOTOS -->
+<section id="tab-photos" class="hidden">
+  <div class="toolbar">
+    <button id="ph-capture">Сделать фото сейчас</button>
+    <label>с <input type="date" id="ph-from"></label>
+    <label>по <input type="date" id="ph-to"></label>
+    <a id="ph-archive" class="button" href="/api/photos/archive">Скачать архив (.tar)</a>
+    <a class="button" href="/api/labels">Скачать разметку (labels.jsonl)</a>
+  </div>
+  <p class="hint" id="ph-hint"></p>
+  <div id="ph-days" class="days"></div>
+  <div id="ph-grid" class="grid"></div>
+</section>
+
+<!-- NETWORK -->
+<section id="tab-net" class="hidden">
+  <div id="net-status" class="card"></div>
+  <div class="toolbar"><button id="net-scan">Найти сети Wi-Fi</button></div>
+  <ul id="net-list" class="netlist"></ul>
+  <form id="net-form" class="card hidden">
+    <div>Сеть: <b id="net-ssid"></b></div>
+    <label>Пароль <input type="password" id="net-psk" autocomplete="off"></label>
+    <label class="inline"><input type="checkbox" id="net-show"> показать</label>
+    <button type="submit" class="primary">Подключиться</button>
+  </form>
+</section>
+
+<!-- SETTINGS -->
+<section id="tab-settings" class="hidden">
+  <form id="cfg-form" class="card cfg">
+    <fieldset><legend>Камеры</legend>
+      <label class="inline"><input type="checkbox" name="cam0"> Камера 0</label>
+      <label class="inline"><input type="checkbox" name="cam1"> Камера 1</label>
+    </fieldset>
+    <fieldset><legend>Распознавание</legend>
+      <label>Кадров ИИ в секунду на камеру (0 = максимум) <input type="number" step="0.5" min="0" max="30" name="ai_fps"></label>
+      <label>Порог уверенности детектора <input type="number" step="0.05" min="0.05" max="0.95" name="obj_thresh"></label>
+      <label>Классы-машины (через запятую) <input type="text" name="vehicle_classes"></label>
+      <label>Показывать на экране только классы (пусто = все) <input type="text" name="draw_classes"></label>
+    </fieldset>
+    <fieldset><legend>Парковочные места</legend>
+      <label>Порог занятости (доля места под машиной) <input type="number" step="0.05" min="0.05" max="1" name="occupancy_threshold"></label>
+      <label>«След» машины — нижняя доля рамки <input type="number" step="0.05" min="0.1" max="1" name="footprint"></label>
+      <label>Подтверждение смены статуса, кадров <input type="number" min="1" max="100" name="debounce"></label>
+    </fieldset>
+    <fieldset><legend>Фото</legend>
+      <label>Интервал автофото, минут (0 = выключено) <input type="number" min="0" max="1440" name="photo_interval_min"></label>
+      <label>Разрешение <select name="photo_res">
+        <option value="1920x1080">1920×1080</option>
+        <option value="1280x720">1280×720</option>
+        <option value="640x480">640×480</option>
+      </select></label>
+      <label>Качество JPEG <input type="number" min="10" max="100" name="jpeg_quality"></label>
+      <label class="inline"><input type="checkbox" name="keep_raw"> Сохранять чистые кадры без рамок (raw/, для обучения)</label>
+      <label>Минимум свободного места на SD, % <input type="number" min="1" max="90" name="min_free_pct"></label>
+    </fieldset>
+    <div class="toolbar">
+      <button type="submit" class="primary">Сохранить</button>
+      <button type="button" id="cfg-restart" class="hidden">Перезапустить приложение</button>
+    </div>
+  </form>
+</section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+config BR2_PACKAGE_PARKING
+	bool "parking"
+	depends on BR2_riscv
+	select BR2_PACKAGE_AI
+	select BR2_PACKAGE_MEDIACTL_LIB
+	select BR2_PACKAGE_NNCASE_LINUX_RUNTIME
+	select BR2_PACKAGE_OPENCV4
+	select BR2_PACKAGE_LIBDRM
+	select BR2_PACKAGE_RAPIDJSON
+	select BR2_PACKAGE_FREETYPE
+	select BR2_PACKAGE_DEJAVU
+	select BR2_PACKAGE_DEJAVU_SANS
+	help
+	  Two-camera object detection and parking spot occupancy with
+	  on-screen overlay, web UI, periodic photos and Wi-Fi setup,
+	  plus the launcher (app switching, touch menu, Wi-Fi setup).

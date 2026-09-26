@@ -1,0 +1,14 @@
+Launcher apps: one *.conf per app (sorted by file name in the menu).
+Shipped apps live in /app/launcher/apps, your own go to /root/data/apps
+(a user file with the same name overrides a shipped one).
+
+  name=Shown in the menu
+  desc=One line description (web page)
+  exec=/absolute/path/to/binary arg1 arg2      (split on spaces, no quoting)
+  cwd=/working/directory
+  env=NAME=value                                (optional, may repeat)
+  action_url=http://127.0.0.1/some/endpoint     (optional, POST on the board action key)
+
+The app gets the display and cameras exclusively. It is stopped with SIGINT,
+then SIGTERM, then SIGKILL (whole process group). Exit code 3 = restart me.
+Output goes to /root/data/logs/<id>.log.
