@@ -1,6 +1,7 @@
 #include "trigger.h"
 
 #include <stdio.h>
+#include <string.h>
 
 #include <algorithm>
 
@@ -8,6 +9,22 @@
 #include "state.h"
 #include "util.h"
 #include "video.h"
+#include "webhook.h"
+
+void Trigger::notify_video()
+{
+    const int64_t kMax = 45 * 1000 * 1000;  // Telegram takes 50 MB per request
+    int64_t size = util::file_size(pending_video_);
+    if (size > 0 && size <= kMax) {
+        g_webhook.send(pending_text_, "video", pending_video_);
+    } else if (size > kMax) {
+        std::string ip = util::iface_ip("wlan0").empty() ? util::iface_ip("eth0") : util::iface_ip("wlan0");
+        std::string rel = pending_video_.substr(strlen(VIDEOS_DIR));
+        g_webhook.send(pending_text_ + "\nВидео " + std::to_string(size / 1000000) +
+                       " МБ, слишком большое для Telegram: http://" + ip + "/videos" + rel);
+    }
+    pending_video_.clear();
+}
 
 void Trigger::tick(Photos &photos, VideoRecorder &video)
 {
@@ -15,6 +32,8 @@ void Trigger::tick(Photos &photos, VideoRecorder &video)
         streak_ = 0;  // one event at a time: wait for the running video to end
         return;
     }
+    if (!pending_video_.empty())
+        notify_video();
     Config cfg;
     uint64_t frames;
     std::string hit_name;
@@ -53,6 +72,25 @@ void Trigger::tick(Photos &photos, VideoRecorder &video)
     snprintf(line, sizeof(line), "%s %.2f  %s", hit_name.c_str(), hit_score,
              util::time_str(util::now_ms(), "%H:%M:%S").c_str());
     printf("trigger: %s, photo %s, video %s\n", line, photo.c_str(), name.c_str());
+
+    // Telegram via the webhook: the photo now, the video when it is finished
+    if (cfg.webhook_enabled) {
+        char text[256];
+        snprintf(text, sizeof(text), "Сработал триггер: %s (%.0f%%)\nКамера %d · видео %d с с камеры %d",
+                 hit_name.c_str(), hit_score * 100, cfg.trigger_ai_cam, cfg.trigger_video_s, rec_cam);
+        if (!photo.empty())
+            g_webhook.send(text, "photo", std::string(PHOTOS_DIR) + "/" + photo);
+        else
+            g_webhook.send(text);
+        if (cfg.webhook_video && !name.empty()) {
+            // name = day/HHMMSS; the camera that actually recorded
+            std::string base = std::string(VIDEOS_DIR) + "/" + name + "_cam";
+            pending_video_ = util::file_size(base + std::to_string(rec_cam) + ".mp4") >= 0
+                                 ? base + std::to_string(rec_cam) + ".mp4"
+                                 : base + std::to_string(cfg.trigger_ai_cam) + ".mp4";
+            pending_text_ = "Видео: " + hit_name + ", " + util::time_str(util::now_ms(), "%H:%M:%S");
+        }
+    }
     std::lock_guard<std::mutex> lk(g_state.mtx);
     g_state.trigger_last = line;
     g_state.trigger_count++;

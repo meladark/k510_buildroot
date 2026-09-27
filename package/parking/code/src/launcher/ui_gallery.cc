@@ -47,6 +47,8 @@ void Menu::load_cam_settings()
         if (!d.HasParseError() && d.IsObject()) {
             if (d.HasMember("trigger_ai_cam") && d["trigger_ai_cam"].IsInt())
                 cs_.trig_cam = d["trigger_ai_cam"].GetInt();
+            if (d.HasMember("webhook_enabled") && d["webhook_enabled"].IsBool())
+                cs_.webhook = d["webhook_enabled"].GetBool();
             if (d.HasMember("trigger_video_s") && d["trigger_video_s"].IsInt())
                 cs_.trig_video_s = d["trigger_video_s"].GetInt();
             if (d.HasMember("trigger_classes") && d["trigger_classes"].IsArray())
@@ -94,6 +96,7 @@ void Menu::save_cam_settings()
     if (cs_.trigger) {
         set_num("trigger_ai_cam", rapidjson::Value(cs_.trig_cam));
         set_num("trigger_video_s", rapidjson::Value(cs_.trig_video_s));
+        set_num("webhook_enabled", rapidjson::Value(cs_.webhook));
         rapidjson::Value cls(rapidjson::kArrayType);
         for (auto &k : cs_.trig_classes)
             cls.PushBack(rapidjson::Value(k.c_str(), al), al);
@@ -162,6 +165,11 @@ void Menu::layout_settings(cv::Mat &c)
             cs_.trig_video_s = vs[i];
             save_cam_settings();
         });
+        segmented(c, y, "Уведомления в Telegram (адрес и ключ — в вебе)", {"Выкл", "Вкл"}, cs_.webhook ? 1 : 0,
+                  [this](int i) {
+                      cs_.webhook = i == 1;
+                      save_cam_settings();
+                  });
     } else {
         int csel = cs_.cam[0] && cs_.cam[1] ? 0 : cs_.cam[0] ? 1 : cs_.cam[1] ? 2 : -1;
         segmented(c, y, "Камеры", {"Обе", "Камера 0", "Камера 1"}, csel, [this](int i) {

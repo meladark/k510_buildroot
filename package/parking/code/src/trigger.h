@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include <string>
+
 class Photos;
 class VideoRecorder;
 
@@ -15,6 +17,9 @@ public:
     void tick(Photos &photos, VideoRecorder &video);  // call often (main loop)
 
 private:
+    void notify_video();
     uint64_t last_frame_ = 0;
     int streak_ = 0;
+    // video of the last event, sent to the webhook once finished
+    std::string pending_video_, pending_text_;
 };

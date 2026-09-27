@@ -8,6 +8,7 @@
 #include "model.h"
 #include "photos.h"
 #include "video.h"
+#include "webhook.h"
 #include "state.h"
 #include "util.h"
 #include "wifi.h"
@@ -26,6 +27,44 @@ static void json_reply(Response &res, const std::string &body, int status = 200)
 static void json_error(Response &res, const std::string &msg, int status = 400)
 {
     json_reply(res, "{\"error\":\"" + util::json_escape(msg) + "\"}", status);
+}
+
+static std::string base64(const unsigned char *p, size_t n)
+{
+    static const char *t = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string o;
+    o.reserve((n + 2) / 3 * 4);
+    for (size_t i = 0; i < n; i += 3) {
+        uint32_t v = p[i] << 16 | (i + 1 < n ? p[i + 1] << 8 : 0) | (i + 2 < n ? p[i + 2] : 0);
+        o += t[v >> 18 & 63];
+        o += t[v >> 12 & 63];
+        o += i + 1 < n ? t[v >> 6 & 63] : '=';
+        o += i + 2 < n ? t[v & 63] : '=';
+    }
+    return o;
+}
+
+// /api/v1/* for bots: "Authorization: Bearer <api_token>" or "X-Api-Token", when a token is set.
+static bool api_authorized(const Request &req, Response &res)
+{
+    std::string want;
+    {
+        std::lock_guard<std::mutex> lk(g_state.mtx);
+        want = g_state.cfg.api_token;
+    }
+    if (want.empty())
+        return true;
+    std::string auth = req.get_header_value("Authorization"), tok = req.get_header_value("X-Api-Token");
+    if (auth.compare(0, 7, "Bearer ") == 0)
+        tok = auth.substr(7);
+    // constant time compare
+    unsigned diff = tok.size() ^ want.size();
+    for (size_t i = 0; i < want.size(); i++)
+        diff |= (unsigned char)want[i] ^ (unsigned char)(i < tok.size() ? tok[i] : 0);
+    if (diff == 0)
+        return true;
+    json_reply(res, "{\"ok\":false,\"error\":\"unauthorized\"}", 401);
+    return false;
 }
 
 static std::string status_json()
@@ -295,6 +334,66 @@ int WebServer::start(int port, const char *www_dir, Photos *photos, VideoRecorde
     });
     util::mkdirs(VIDEOS_DIR);
     svr->set_mount_point("/videos", VIDEOS_DIR);
+
+    // ---- for bots (parking mode): places and a fresh annotated photo
+    //   GET /api/v1/parking            {"ok","time","free","busy","total","spots":[...],"photo_url"}
+    //   GET /api/v1/parking?photo=1    same + "photo_base64" (JPEG)
+    //   GET /api/v1/parking/photo.jpg  the photo itself
+    svr->Get("/api/v1/parking", [photos](const Request &req, Response &res) {
+        if (!api_authorized(req, res))
+            return;
+        if (g_state.trigger_mode)
+            return json_reply(res, "{\"ok\":false,\"error\":\"not in parking mode\"}", 404);
+        std::string o;
+        int free_n = 0, total = 0;
+        {
+            std::lock_guard<std::mutex> lk(g_state.mtx);
+            o = "\"spots\":[";
+            for (size_t i = 0; i < g_state.spots.size(); i++) {
+                const Spot &s = g_state.spots[i];
+                char b[256];
+                snprintf(b, sizeof(b),
+                         "%s{\"id\":\"%s\",\"cam\":%d,\"occupied\":%s,\"coverage\":%.2f,\"since\":%lld,\"since_str\":\"%s\"}",
+                         i ? "," : "", util::json_escape(s.id).c_str(), s.cam, s.occupied ? "true" : "false",
+                         s.coverage, (long long)s.since_ms,
+                         s.since_ms ? util::time_str(s.since_ms, "%Y-%m-%d %H:%M:%S").c_str() : "");
+                o += b;
+                total++;
+                free_n += !s.occupied;
+            }
+            o += "]";
+        }
+        char head[256];
+        snprintf(head, sizeof(head),
+                 "{\"ok\":true,\"time\":%lld,\"time_str\":\"%s\",\"free\":%d,\"busy\":%d,\"total\":%d,",
+                 (long long)util::now_ms(), util::time_str(util::now_ms(), "%Y-%m-%d %H:%M:%S").c_str(), free_n,
+                 total - free_n, total);
+        std::string body = head + o + ",\"photo_url\":\"/api/v1/parking/photo.jpg\"";
+        if (req.get_param_value("photo") == "1") {
+            std::vector<unsigned char> jpg;
+            if (photos->live_annotated(jpg))
+                body += ",\"photo_base64\":\"" + base64(jpg.data(), jpg.size()) + "\"";
+        }
+        json_reply(res, body + "}");
+    });
+    svr->Get("/api/v1/parking/photo.jpg", [photos](const Request &req, Response &res) {
+        if (!api_authorized(req, res))
+            return;
+        std::vector<unsigned char> jpg;
+        if (!photos->live_annotated(jpg))
+            return json_reply(res, "{\"ok\":false,\"error\":\"no camera frame\"}", 503);
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(std::string((const char *)jpg.data(), jpg.size()), "image/jpeg");
+    });
+    // trigger mode: settings page "check" button
+    svr->Post("/api/webhook/test", [](const Request &, Response &res) {
+        std::string err;
+        int st = g_webhook.send_now("Проверка связи с K510 (" + util::time_str(util::now_ms(), "%H:%M:%S") + ")", &err);
+        if (st == 200)
+            return json_reply(res, "{\"ok\":true}");
+        json_error(res, st == 0 ? "уведомления выключены — включите и сохраните" :
+                        "ответ " + std::to_string(st) + ": " + err, 502);
+    });
 
     svr->Post("/api/photos/capture", [photos](const Request &req, Response &res) {
         std::string o = "{\"files\":[";

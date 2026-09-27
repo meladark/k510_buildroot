@@ -137,6 +137,7 @@ private:
         std::string path, app_name;
         bool trigger = false;
         int trig_cam = 0, trig_video_s = 60;
+        bool webhook = false;
         std::vector<std::string> trig_classes;
     } cs_;
     int models_page_ = 0;

@@ -43,6 +43,14 @@ struct Config {
     std::vector<std::string> trigger_classes = {"cat"};
     int trigger_video_s = 60;                // 30 s .. 10 min
     int trigger_confirm = 2;                 // consecutive AI frames with the class before it fires
+    // trigger notifications to a Gopac webhook (Telegram)
+    bool webhook_enabled = false;
+    std::string webhook_url;                 // http://host:8080/api/v1/notify
+    std::string webhook_token;
+    std::string webhook_device_id = "k510";
+    bool webhook_video = true;               // also send the video when it is finished
+    // parking: token for /api/v1/* (bots); empty = no token needed
+    std::string api_token;
     int web_port = 80;
     std::string ap_ssid = "K510-Setup";
     std::string ap_psk = "k510setup";

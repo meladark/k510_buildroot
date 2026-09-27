@@ -58,7 +58,13 @@ std::string Config::to_json() const
     std::string o = buf;
     o += "  \"vehicle_classes\": " + str_list_json(vehicle_classes) + ",\n";
     o += "  \"draw_classes\": " + str_list_json(draw_classes) + ",\n";
-    o += "  \"trigger_classes\": " + str_list_json(trigger_classes) + "\n}\n";
+    o += "  \"trigger_classes\": " + str_list_json(trigger_classes) + ",\n";
+    o += "  \"webhook_enabled\": " + std::string(webhook_enabled ? "true" : "false") + ",\n";
+    o += "  \"webhook_url\": \"" + util::json_escape(webhook_url) + "\",\n";
+    o += "  \"webhook_token\": \"" + util::json_escape(webhook_token) + "\",\n";
+    o += "  \"webhook_device_id\": \"" + util::json_escape(webhook_device_id) + "\",\n";
+    o += "  \"webhook_video\": " + std::string(webhook_video ? "true" : "false") + ",\n";
+    o += "  \"api_token\": \"" + util::json_escape(api_token) + "\"\n}\n";
     return o;
 }
 
@@ -94,6 +100,14 @@ bool Config::from_json(const std::string &json, std::string *err)
     GET_INT(trigger_ai_cam);
     GET_INT(trigger_video_s);
     GET_INT(trigger_confirm);
+    GET_STR(webhook_url);
+    GET_STR(webhook_token);
+    GET_STR(webhook_device_id);
+    GET_STR(api_token);
+    if (d.HasMember("webhook_enabled") && d["webhook_enabled"].IsBool())
+        c.webhook_enabled = d["webhook_enabled"].GetBool();
+    if (d.HasMember("webhook_video") && d["webhook_video"].IsBool())
+        c.webhook_video = d["webhook_video"].GetBool();
     GET_INT(web_port);
     GET_STR(ap_ssid);
     GET_STR(ap_psk);
@@ -126,7 +140,10 @@ bool Config::from_json(const std::string &json, std::string *err)
         c.photo_width > 1920 || c.photo_height < 240 || c.photo_height > 1080 ||
         c.ap_psk.size() < 8 || c.video_max_min < 1 || c.video_max_min > 120 ||
         c.trigger_ai_cam < 0 || c.trigger_ai_cam >= NUM_CAMS || c.trigger_video_s < 30 || c.trigger_video_s > 600 ||
-        c.trigger_confirm < 1 || c.trigger_confirm > 30) {
+        c.trigger_confirm < 1 || c.trigger_confirm > 30 || c.webhook_device_id.empty() ||
+        c.webhook_device_id.size() > 64 ||
+        c.webhook_device_id.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-") !=
+            std::string::npos) {
         if (err)
             *err = "value out of range";
         return false;

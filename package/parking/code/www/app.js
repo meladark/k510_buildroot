@@ -516,6 +516,9 @@ const settings = {
       for (const k of ['ai_fps', 'obj_thresh', 'occupancy_threshold', 'footprint', 'debounce', 'photo_interval_min',
         'jpeg_quality', 'min_free_pct', 'video_max_min', 'trigger_ai_cam', 'trigger_video_s', 'trigger_confirm']) f[k].value = c[k];
       f.trigger_classes.value = (c.trigger_classes || []).join(', ');
+      for (const k of ['webhook_url', 'webhook_token', 'webhook_device_id', 'api_token']) f[k].value = c[k] || '';
+      f.webhook_enabled.checked = !!c.webhook_enabled;
+      f.webhook_video.checked = c.webhook_video !== false;
       f.vehicle_classes.value = c.vehicle_classes.join(', ');
       f.draw_classes.value = c.draw_classes.join(', ');
       f.photo_res.value = `${c.photo_width}x${c.photo_height}`;
@@ -548,6 +551,12 @@ $('#cfg-form').addEventListener('submit', async (ev) => {
     trigger_video_s: +f.trigger_video_s.value,
     trigger_confirm: +f.trigger_confirm.value,
     trigger_classes: list(f.trigger_classes.value),
+    webhook_enabled: f.webhook_enabled.checked,
+    webhook_video: f.webhook_video.checked,
+    webhook_url: f.webhook_url.value.trim(),
+    webhook_token: f.webhook_token.value.trim(),
+    webhook_device_id: f.webhook_device_id.value.trim() || 'k510',
+    api_token: f.api_token.value.trim(),
   });
   try {
     const r = await api('PUT', '/api/config', c);
@@ -680,6 +689,13 @@ $('#md-table').addEventListener('click', (ev) => {
     } catch (e) { toast(e.message, true); }
   });
 });
+
+$('#wh-test').addEventListener('click', (ev) => working(ev.currentTarget, async () => {
+  try {
+    await api('POST', '/api/webhook/test');
+    toast('Отправлено — проверьте Telegram');
+  } catch (e) { toast(e.message, true); }
+}));
 
 // launcher page (app switching) lives on :8080 of the same host
 $('#apps-link').href = `http://${location.hostname}:8080/`;

@@ -31,6 +31,7 @@ set(SRC
     src/shm_guard.cc
     src/video.cc
     src/trigger.cc
+    src/webhook.cc
     src/canaan/cv2_utils.cc
 )
 

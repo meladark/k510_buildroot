@@ -124,6 +124,58 @@ static std::string spots_json(const std::vector<Spot> &spots, int cam)
 
 // One photo = all running cameras stacked vertically (cam0 on top). With AI on,
 // the stacked image shows boxes and spots; clean frames go to raw/ for training.
+// One camera frame with detections/spots (when AI runs) and a time stamp.
+cv::Mat Photos::render_cam(const cv::Mat &frame, int c, bool ai, const std::vector<Detection> &dets,
+                           const std::vector<Spot> &spots, const Config &cfg, int64_t now)
+{
+    cv::Mat bgra;
+    cv::cvtColor(frame, bgra, cv::COLOR_BGR2BGRA);
+    if (ai)
+        annotate(bgra, c, dets, spots, cfg);
+    int px = std::max(14, bgra.cols / 40);
+    std::string stamp = util::time_str(now, "%Y-%m-%d %H:%M:%S") + "   CAM" + std::to_string(c);
+    cv::Rect band(0, bgra.rows - px * 2, bgra.cols, px * 2);
+    cv::Mat roi = bgra(band);
+    roi = roi * 0.4;  // darken for readability
+    if (text_.ok())
+        text_.draw(bgra, stamp, cv::Point(px / 2, bgra.rows - px / 2), px, cv::Scalar(255, 255, 255, 255));
+    cv::Mat bgr;
+    cv::cvtColor(bgra, bgr, cv::COLOR_BGRA2BGR);
+    return bgr;
+}
+
+bool Photos::live_annotated(std::vector<unsigned char> &jpg, int quality)
+{
+    std::lock_guard<std::mutex> cap_lk(capture_mtx_);
+    cv::Mat frames[NUM_CAMS];
+    for (int c = 0; c < NUM_CAMS; c++)
+        if (cams_[c] && cams_[c]->running() && !cams_[c]->snapshot(frames[c]))
+            frames[c].release();
+    Config cfg;
+    std::vector<Spot> spots;
+    std::vector<Detection> dets[NUM_CAMS];
+    bool ai[NUM_CAMS] = {false, false};
+    {
+        std::lock_guard<std::mutex> lk(g_state.mtx);
+        cfg = g_state.cfg;
+        spots = g_state.spots;
+        for (int c = 0; c < NUM_CAMS; c++) {
+            dets[c] = g_state.cams[c].dets;
+            ai[c] = g_state.cams[c].running;
+        }
+    }
+    std::vector<cv::Mat> parts;
+    int64_t now = util::now_ms();
+    for (int c = 0; c < NUM_CAMS; c++)
+        if (!frames[c].empty())
+            parts.push_back(render_cam(frames[c], c, ai[c], dets[c], spots, cfg, now));
+    if (parts.empty())
+        return false;
+    cv::Mat stacked;
+    cv::vconcat(parts, stacked);
+    return cv::imencode(".jpg", stacked, jpg, {cv::IMWRITE_JPEG_QUALITY, quality});
+}
+
 std::string Photos::capture(const std::string &reason, int dets_cam, const std::vector<Detection> *dets_override)
 {
     std::lock_guard<std::mutex> cap_lk(capture_mtx_);
@@ -188,19 +240,7 @@ std::string Photos::capture(const std::string &reason, int dets_cam, const std::
     for (int c = 0; c < NUM_CAMS; c++) {
         if (frames[c].empty())
             continue;
-        cv::Mat bgra;
-        cv::cvtColor(frames[c], bgra, cv::COLOR_BGR2BGRA);
-        if (ai[c])
-            annotate(bgra, c, dets[c], spots, cfg);
-        int px = std::max(14, bgra.cols / 40);
-        std::string stamp = util::time_str(now, "%Y-%m-%d %H:%M:%S") + "   CAM" + std::to_string(c);
-        cv::Rect band(0, bgra.rows - px * 2, bgra.cols, px * 2);
-        cv::Mat roi = bgra(band);
-        roi = roi * 0.4;  // darken for readability
-        if (text_.ok())
-            text_.draw(bgra, stamp, cv::Point(px / 2, bgra.rows - px / 2), px, cv::Scalar(255, 255, 255, 255));
-        cv::Mat bgr;
-        cv::cvtColor(bgra, bgr, cv::COLOR_BGRA2BGR);
+        cv::Mat bgr = render_cam(frames[c], c, ai[c], dets[c], spots, cfg, now);
         parts.push_back(bgr);
 
         char head[160];

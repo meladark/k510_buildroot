@@ -19,6 +19,7 @@
 #include "util.h"
 #include "trigger.h"
 #include "video.h"
+#include "webhook.h"
 #include "web.h"
 #include "wifi.h"
 
@@ -219,6 +220,8 @@ int main(int argc, char **argv)
         fprintf(stderr, "parking: web server failed\n");
 
     Trigger trigger;
+    if (trigger_mode)
+        g_webhook.start();
     while (!g_quit.load()) {
         usleep(trigger_mode ? 100000 : 1000000);
         video.tick();
@@ -228,6 +231,7 @@ int main(int argc, char **argv)
 
     printf("parking: stopping\n");
     video.stop();  // finish the MP4s before the cameras go away
+    g_webhook.stop();
     web.stop();
     photos.stop();
     for (int c = 0; c < NUM_CAMS; c++)

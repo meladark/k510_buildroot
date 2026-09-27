@@ -128,6 +128,20 @@
         <option value="300">5 минут</option><option value="600">10 минут</option></select></label>
       <label>Подтверждение, кадров ИИ подряд <input type="number" min="1" max="30" name="trigger_confirm"></label>
     </fieldset>
+    <fieldset class="trigger-only"><legend>Уведомления в Telegram (Gopac webhook)</legend>
+      <label class="inline"><input type="checkbox" name="webhook_enabled"> Отправлять при срабатывании</label>
+      <label class="inline"><input type="checkbox" name="webhook_video"> Присылать и видео, когда запись закончится</label>
+      <label>Адрес <input type="text" name="webhook_url" placeholder="http://192.168.5.10:8080/api/v1/notify"></label>
+      <label>Токен <input type="password" name="webhook_token" autocomplete="off"></label>
+      <label>device_id (как в routes.toml) <input type="text" name="webhook_device_id"></label>
+      <div class="toolbar"><button type="button" id="wh-test">Проверить (сохраните сначала)</button></div>
+    </fieldset>
+    <fieldset class="parking-only"><legend>API для бота</legend>
+      <label>Токен (пусто — без токена) <input type="password" name="api_token" autocomplete="off"></label>
+      <p class="hint" style="grid-column:1/-1">GET <code>/api/v1/parking</code> — места и ссылка на фото,
+        <code>?photo=1</code> — фото в ответе (base64), <code>/api/v1/parking/photo.jpg</code> — само фото.
+        Заголовок <code>Authorization: Bearer &lt;токен&gt;</code>.</p>
+    </fieldset>
     <fieldset class="parking-only"><legend>Парковочные места</legend>
       <label>Порог занятости (доля места под машиной) <input type="number" step="0.05" min="0.05" max="1" name="occupancy_threshold"></label>
       <label>«След» машины — нижняя доля рамки <input type="number" step="0.05" min="0.1" max="1" name="footprint"></label>

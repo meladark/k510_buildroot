@@ -21,6 +21,8 @@ public:
     // cam/dets: draw these detections for that camera instead of the current
     // ones (the trigger passes the frame that fired; the photo comes ~1 s later).
     std::string capture(const std::string &reason, int cam = -1, const std::vector<Detection> *dets = nullptr);
+    // All cameras now, stacked and annotated like a stored photo, not stored.
+    bool live_annotated(std::vector<unsigned char> &jpg, int quality = 85);
     // Current frame as JPEG for the web editor (not stored).
     bool live_jpeg(int cam, int quality, std::vector<unsigned char> &out);
 
@@ -38,6 +40,8 @@ private:
     void enforce_free_space();
     void annotate(cv::Mat &bgra, int cam, const std::vector<Detection> &dets, const std::vector<Spot> &spots,
                   const Config &cfg);
+    cv::Mat render_cam(const cv::Mat &frame, int cam, bool ai, const std::vector<Detection> &dets,
+                       const std::vector<Spot> &spots, const Config &cfg, int64_t now);
     TextRenderer text_;
 
     PhotoCam *cams_[NUM_CAMS] = {nullptr, nullptr};
