@@ -32,6 +32,8 @@
 #define STATUS_PATH "/tmp/k510_status.txt"
 #define CORNER_PX 220
 #define LONG_PRESS_MS 2000
+#define KEY_SCREEN_OFF_MS 1500  // menu key held: screen off
+#define KEY_LONG_ACTION_MS 1000 // action key held: long action (video)
 
 struct LauncherConfig {
     std::string default_app = "10-parking";
@@ -39,8 +41,9 @@ struct LauncherConfig {
     int ap_timeout_s = 60;
     int menu_timeout_s = 300;
     int web_port = 8080;
-    int key_menu = 48;    // board button that opens/closes the menu (KEY_B)
-    int key_action = 30;  // board button for the app action, e.g. photo (KEY_A)
+    int key_menu = 30;    // board button that opens/closes the menu (KEY_A)
+    int key_action = 48;  // board button for the app action, e.g. photo (KEY_B)
+    int keys_version = 2; // 1: menu on KEY_B, action on KEY_A (before the swap)
     TouchCalib touch;
 
     void load()
@@ -62,6 +65,15 @@ struct LauncherConfig {
         num("web_port", web_port);
         num("key_menu", key_menu);
         num("key_action", key_action);
+        keys_version = 1;
+        num("keys_version", keys_version);
+        // configs written before the swap still hold the old defaults: swap them
+        // once, but leave a hand-made assignment alone
+        if (keys_version < 2) {
+            if (key_menu == 48 && key_action == 30)
+                std::swap(key_menu, key_action);
+            keys_version = 2;
+        }
         if (d.HasMember("touch") && d["touch"].IsObject()) {
             auto &t = d["touch"];
             if (t.HasMember("raw_w") && t["raw_w"].IsInt()) touch.raw_w = t["raw_w"].GetInt();
@@ -78,10 +90,10 @@ struct LauncherConfig {
         snprintf(buf, sizeof(buf),
                  "{\n  \"default_app\": \"%s\",\n  \"ap_ssid\": \"%s\",\n  \"ap_psk\": \"%s\",\n"
                  "  \"ap_timeout_s\": %d,\n  \"menu_timeout_s\": %d,\n  \"web_port\": %d,\n"
-                 "  \"key_menu\": %d,\n  \"key_action\": %d,\n"
+                 "  \"key_menu\": %d,\n  \"key_action\": %d,\n  \"keys_version\": %d,\n"
                  "  \"touch\": {\"raw_w\": %d, \"raw_h\": %d, \"invert_x\": %s, \"invert_y\": %s, \"swap_xy\": %s}\n}\n",
                  util::json_escape(default_app).c_str(), util::json_escape(ap_ssid).c_str(),
-                 util::json_escape(ap_psk).c_str(), ap_timeout_s, menu_timeout_s, web_port, key_menu, key_action, touch.raw_w,
+                 util::json_escape(ap_psk).c_str(), ap_timeout_s, menu_timeout_s, web_port, key_menu, key_action, keys_version, touch.raw_w,
                  touch.raw_h, touch.invert_x ? "true" : "false", touch.invert_y ? "true" : "false",
                  touch.swap_xy ? "true" : "false");
         util::mkdirs(CONF_DIR);
@@ -142,7 +154,9 @@ static void start_web(httplib::Server &svr, int port, std::thread &th)
             "background:#f5f6f8;color:#1d2330}@media(prefers-color-scheme:dark){body{background:#11151c;color:#e6e9ef}"
             ".app{background:#1a202b!important;border-color:#2c3444!important}}h1{font-size:20px}"
             ".app{display:block;width:100%;text-align:left;padding:12px 14px;margin:8px 0;border:1px solid #d9dde5;"
-            "border-radius:10px;background:#fff;color:inherit;font:inherit;cursor:pointer}.app small{display:block;opacity:.7}"
+            "border-radius:10px;background:#fff;color:inherit;font:inherit;cursor:pointer;"
+            "transition:transform .08s,border-color .15s,box-shadow .15s}.app:hover{border-color:#2563eb}"
+            ".app:active{transform:scale(.98)}.app small{display:block;opacity:.7}"
             ".cur{border-color:#16a34a!important;box-shadow:0 0 0 2px #16a34a55}a{color:#2563eb}</style>"
             "<h1>K510 · приложения</h1><p>Сейчас: <b>" + util::json_escape(cur) + "</b> · "
             "<a href='http://" + host + "/'>веб-интерфейс приложения (:80)</a></p>";
@@ -242,11 +256,33 @@ int main()
     DrmOut drm;
     Menu menu;
     bool in_menu = false;
-    int64_t menu_activity = 0, last_render = 0;
+    int64_t menu_activity = 0;
     bool ignore_until_up = false;
+    // board keys: press time, whether the hold action already fired, and
+    // presses that only woke the screen (ignored until released)
+    int64_t menu_down = 0, action_down = 0;
+    bool menu_long = false, action_long = false, swallow_menu = false, swallow_action = false;
+    bool touch_swallow = false;
+    bool screen_off = false, menu_black = false;
+    unlink(SCREEN_OFF_PATH);
+    auto set_screen = [&](bool off) {
+        if (off == screen_off)
+            return;
+        screen_off = off;
+        printf("launcher: screen %s\n", off ? "off" : "on");
+        if (off)
+            util::write_file_atomic(SCREEN_OFF_PATH, "1\n");  // the app covers its output with black
+        else
+            unlink(SCREEN_OFF_PATH);
+        menu_black = false;
+        menu.mark_dirty();
+    };
     int down_x = 0, down_y = 0;
     int osd_idx = 0;
     cv::Mat canvas;
+    // Area of the canvas each OSD buffer is missing: a frame usually changes only
+    // one button, so only that part is copied (8 MB per full screen otherwise).
+    cv::Rect osd_stale[OSD_BUFS];
 
     auto set_current = [&](const std::string &id) {
         std::lock_guard<std::mutex> lk(g_req_mtx);
@@ -278,6 +314,7 @@ int main()
             return;
         sup.stop();
         set_current("меню");
+        util::defrag_memory();
         if (drm.init() != 0) {
             fprintf(stderr, "launcher: cannot open display for the menu\n");
             drm.deinit();
@@ -286,9 +323,11 @@ int main()
         canvas.create(drm.height(), drm.width(), CV_8UC4);
         apps = load_apps();
         menu.open(apps, last_app, err);
+        menu_black = false;  // new DRM buffers: draw the black frame again if the screen is off
         in_menu = true;
         menu_activity = util::mono_ms();
-        last_render = 0;
+        for (auto &r : osd_stale)
+            r = cv::Rect(0, 0, canvas.cols, canvas.rows);
     };
 
     Menu::Actions act;
@@ -322,7 +361,7 @@ int main()
             drm_i = n;
             fds[n++] = {drm.fd(), POLLIN, 0};
         }
-        poll(fds, n, 100);
+        poll(fds, n, in_menu && menu.animating() ? 15 : 100);
         bool drm_ready = drm_i >= 0 && (fds[drm_i].revents & POLLIN);
 
         // web requests
@@ -339,43 +378,92 @@ int main()
         if (req_menu)
             enter_menu("");
 
-        // board keys: one toggles the menu, the other triggers the app action
+        // board keys. Menu: short = menu on/off, held = screen off. Action: short =
+        // app action (photo), held = long action (video). With the screen off
+        // any key only turns it back on.
         struct input_event ie;
+        const int64_t now_ms = util::mono_ms();
         while (key_fd >= 0 && read(key_fd, &ie, sizeof(ie)) == (ssize_t)sizeof(ie)) {
-            if (ie.type != EV_KEY || ie.value != 1)
+            if (ie.type != EV_KEY || ie.value == 2)  // ignore auto-repeat
                 continue;
-            if (ie.code == cfg.key_menu) {
+            bool is_menu = ie.code == cfg.key_menu, is_action = ie.code == cfg.key_action;
+            if (!is_menu && !is_action)
+                continue;
+            bool &swallow = is_menu ? swallow_menu : swallow_action;
+            if (ie.value == 1) {
+                if (screen_off) {
+                    set_screen(false);
+                    swallow = true;
+                    continue;
+                }
+                (is_menu ? menu_down : action_down) = now_ms;
+                (is_menu ? menu_long : action_long) = false;
+                continue;
+            }
+            // release
+            if (swallow) {
+                swallow = false;
+                continue;
+            }
+            if (is_menu && menu_down && !menu_long) {
                 if (in_menu)
                     act.resume();
                 else
                     enter_menu("");
-            } else if (ie.code == cfg.key_action && !in_menu && sup.running() &&
+            } else if (is_action && action_down && !action_long && !in_menu && sup.running() &&
                        !sup.app().action_url.empty()) {
                 post_action(sup.app().action_url);
             }
+            (is_menu ? menu_down : action_down) = 0;
+        }
+        if (menu_down && !menu_long && now_ms - menu_down >= KEY_SCREEN_OFF_MS) {
+            menu_long = true;
+            set_screen(true);
+        }
+        if (action_down && !action_long && now_ms - action_down >= KEY_LONG_ACTION_MS) {
+            action_long = true;
+            if (!in_menu && sup.running() && !sup.app().action_long_url.empty())
+                post_action(sup.app().action_long_url);
         }
 
         TouchEvent ev;
         while (touch.fd() >= 0 && touch.read(ev)) {
+            // a touch on the dark screen only wakes it
+            if (ev.type == TouchEvent::DOWN && screen_off) {
+                set_screen(false);
+                touch_swallow = true;
+            }
+            if (touch_swallow) {
+                if (ev.type == TouchEvent::UP)
+                    touch_swallow = false;
+                continue;
+            }
             if (ev.type == TouchEvent::DOWN) {
                 down_x = ev.x;
                 down_y = ev.y;
             }
             if (in_menu) {
                 menu_activity = util::mono_ms();
-                if (ev.type == TouchEvent::UP) {
-                    int dx = ev.x - down_x, dy = ev.y - down_y;
-                    if (ignore_until_up)
+                if (ignore_until_up) {
+                    if (ev.type == TouchEvent::UP)
                         ignore_until_up = false;  // release of the long press that opened the menu
-                    else if (std::abs(dx) > (int)sw / 7 && std::abs(dx) > 2 * std::abs(dy))
+                } else if (ev.type == TouchEvent::DOWN) {
+                    menu.press(ev.x, ev.y);
+                } else if (ev.type == TouchEvent::MOVE) {
+                    menu.drag(ev.x, ev.y);
+                } else if (ev.type == TouchEvent::UP) {
+                    int dx = ev.x - down_x, dy = ev.y - down_y;
+                    if (std::abs(dx) > (int)sw / 7 && std::abs(dx) > 2 * std::abs(dy)) {
+                        menu.cancel_press();
                         menu.swipe(dx < 0 ? -1 : 1);
-                    else
-                        menu.tap(ev.x, ev.y);
+                    } else {
+                        menu.release(ev.x, ev.y);
+                    }
                 }
             }
         }
         // long press in the corner while an app is running
-        if (!in_menu && touch.is_down() && touch.x() < CORNER_PX && touch.y() < CORNER_PX &&
+        if (!in_menu && !touch_swallow && touch.is_down() && touch.x() < CORNER_PX && touch.y() < CORNER_PX &&
             util::mono_ms() - touch.down_since() >= LONG_PRESS_MS) {
             ignore_until_up = true;
             enter_menu("");
@@ -395,21 +483,41 @@ int main()
             act.resume();  // opened by accident or forgotten: go back to the app
             continue;
         }
-        if (!in_menu)
+        if (drm.pending())
             continue;
-        if ((menu.dirty() || util::mono_ms() - last_render > 1000) && !drm.pending()) {
-            menu.render(canvas);
-            DrmBuf &b = drm.osd_buf(osd_idx);
-            for (int y = 0; y < canvas.rows; y++)
-                memcpy((uint8_t *)b.map + (size_t)y * b.pitch, canvas.ptr(y), (size_t)canvas.cols * 4);
-            int vid[2] = {-1, -1};
-            drm.commit(vid, osd_idx);
+        cv::Rect changed;
+        if (screen_off) {
+            if (menu_black)
+                continue;
+            canvas.setTo(cv::Scalar(0, 0, 0, 255));
+            changed = cv::Rect(0, 0, canvas.cols, canvas.rows);
+            menu_black = true;
+        } else {
+            bool want = menu.tick(util::mono_ms());  // may run a tapped action (launch, resume…)
+            if (!in_menu || !want)
+                continue;
+            changed = menu.render(canvas);
+        }
+        if (changed.empty())
+            continue;
+        for (auto &r : osd_stale)
+            r = r.empty() ? changed : (r | changed);
+        cv::Rect &r = osd_stale[osd_idx];
+        DrmBuf &b = drm.osd_buf(osd_idx);
+        for (int y = r.y; y < r.y + r.height; y++)
+            memcpy((uint8_t *)b.map + (size_t)y * b.pitch + r.x * 4, canvas.ptr(y) + r.x * 4, (size_t)r.width * 4);
+        r = cv::Rect();
+        int vid[2] = {-1, -1};
+        if (drm.commit(vid, osd_idx) == 0) {
             osd_idx = (osd_idx + 1) % OSD_BUFS;
-            last_render = util::mono_ms();
+        } else {
+            menu.mark_dirty();  // try again with a full frame
+            usleep(20000);
         }
     }
 
     printf("launcher: stopping\n");
+    unlink(SCREEN_OFF_PATH);
     sup.stop();
     if (in_menu) {
         drm.disable_planes();

@@ -1,5 +1,8 @@
 #include "ui.h"
 
+#include <algorithm>
+#include <cmath>
+
 #include <opencv2/imgproc.hpp>
 
 #include "util.h"
@@ -27,6 +30,10 @@ void Menu::open(const std::vector<App> &apps, const std::string &current_app, co
     current_app_ = current_app;
     error_ = error;
     screen_ = MAIN;
+    press_ = Press();
+    restore_img_.release();
+    refresh_status();
+    status_t_ = util::mono_ms();
     dirty_ = true;
 }
 
@@ -43,47 +50,225 @@ void Menu::button(cv::Mat &c, const cv::Rect &r, const std::string &label, int s
 void Menu::header(cv::Mat &c, const std::string &title)
 {
     text_->draw(c, title, cv::Point(4 * u_, 9 * u_), 6 * u_, kText);
-    std::string t = util::time_str(util::now_ms(), "%H:%M");
-    cv::Size sz = text_->measure(t, 5 * u_);
-    text_->draw(c, t, cv::Point(w_ - 4 * u_ - sz.width, 9 * u_), 5 * u_, kMuted);
+    cv::Size sz = text_->measure(clock_, 5 * u_);
+    text_->draw(c, clock_, cv::Point(w_ - 4 * u_ - sz.width, 9 * u_), 5 * u_, kMuted);
     cv::line(c, cv::Point(4 * u_, 12 * u_), cv::Point(w_ - 4 * u_, 12 * u_), kPanel, 2);
 }
 
-void Menu::render(cv::Mat &c)
+bool Menu::refresh_status()
 {
-    buttons_.clear();
-    c.setTo(kBg);
-    switch (screen_) {
-    case MAIN: layout_main(c); break;
-    case WIFI: layout_wifi(c); break;
-    case KEYBOARD: layout_keyboard(c); break;
-    case MESSAGE: layout_message(c); break;
-    case SETTINGS: layout_settings(c); break;
-    case GAL_DAYS: layout_gal_days(c); break;
-    case GAL_GRID: layout_gal_grid(c); break;
-    case GAL_VIEW: layout_gal_view(c); break;
-    case GAL_CONFIRM: layout_gal_confirm(c); break;
-    }
-    if (busy_.load()) {
-        cv::Rect r(w_ / 2 - 25 * u_, h_ / 2 - 8 * u_, 50 * u_, 16 * u_);
-        cv::rectangle(c, r, kPanel, cv::FILLED);
-        text_->draw_centered(c, screen_ == MESSAGE ? "Подключение…" : "Поиск сетей…", r, 5 * u_, kText);
-    }
-    dirty_ = false;
+    std::string eth = util::iface_ip("eth0"), wl = util::iface_ip("wlan0");
+    std::string net = (eth.empty() ? "" : "Кабель: " + eth + "   ") + (wl.empty() ? "" : "Wi-Fi: " + wl);
+    std::string sys;
+    util::read_file(SYS_STATUS_PATH, sys);
+    while (!sys.empty() && (sys.back() == '\n' || sys.back() == '\r'))
+        sys.pop_back();
+    std::string clk = util::time_str(util::now_ms(), "%H:%M");
+    bool changed = net != net_line_ || sys != sys_line_ || clk != clock_;
+    net_line_ = net;
+    sys_line_ = sys;
+    clock_ = clk;
+    return changed;
 }
 
-void Menu::tap(int x, int y)
+static cv::Rect unite(const cv::Rect &a, const cv::Rect &b)
 {
-    if (busy_.load())
-        return;
-    for (auto &b : buttons_) {
-        if (b.r.contains(cv::Point(x, y)) && b.on_tap) {
-            auto fn = b.on_tap;  // buttons_ is rebuilt by the handler's re-render
-            fn();
-            dirty_ = true;
-            return;
+    return a.empty() ? b : b.empty() ? a : (a | b);
+}
+
+cv::Rect Menu::render(cv::Mat &c)
+{
+    const int64_t now = util::mono_ms();
+    const cv::Rect full(0, 0, c.cols, c.rows);
+    cv::Rect changed;
+    if (dirty_.exchange(false)) {
+        buttons_.clear();
+        c.setTo(kBg);
+        switch (screen_) {
+        case MAIN: layout_main(c); break;
+        case WIFI: layout_wifi(c); break;
+        case KEYBOARD: layout_keyboard(c); break;
+        case MESSAGE: layout_message(c); break;
+        case SETTINGS: layout_settings(c); break;
+    case MODELS: layout_models(c); break;
+        case GAL_DAYS: layout_gal_days(c); break;
+        case GAL_GRID: layout_gal_grid(c); break;
+        case GAL_VIEW: layout_gal_view(c); break;
+        case GAL_CONFIRM: layout_gal_confirm(c); break;
+        }
+        changed = full;
+        restore_img_.release();
+        // left the video, or swiped to another shot: stop playing
+        if (playing_ && (screen_ != GAL_VIEW || gal_index_ >= (int)gal_shots_.size() ||
+                         gal_shots_[gal_index_].key != play_key_))
+            play_stop();
+        play_seq_[0] = play_seq_[1] = ~0ull;  // the layout wiped the frames: redraw them
+        if (press_.active && !press_.released) {
+            // redrawn under the finger (clock tick etc.): keep the press if the button is still there
+            const Button *b = hit(press_.at.x, press_.at.y);
+            if (!b || b->r != press_.r)
+                press_ = Press();
+        }
+        if (press_.active)
+            press_.under = c(press_.r).clone();
+    } else {
+        if (!restore_img_.empty()) {  // press cancelled: put the plain button back
+            restore_img_.copyTo(c(restore_r_));
+            changed = restore_r_;
+            restore_img_.release();
+        }
+        if (press_.active) {
+            if (press_.under.empty())
+                press_.under = c(press_.r).clone();
+            else
+                press_.under.copyTo(c(press_.r));
         }
     }
+    changed = unite(changed, draw_play(c));
+    changed = unite(changed, draw_press(c, now));
+    changed = unite(changed, draw_busy(c, now));
+    return changed;
+}
+
+// ---------------------------------------------------------------- touch feedback
+
+static const int kGrowMs = 280;     // ripple spreads over the button while held
+static const int kReleaseMs = 120;  // flash after release, then the action runs
+
+const Menu::Button *Menu::hit(int x, int y) const
+{
+    for (auto &b : buttons_)
+        if (b.on_tap && b.r.contains(cv::Point(x, y)))
+            return &b;
+    return nullptr;
+}
+
+void Menu::press(int x, int y)
+{
+    if (busy_.load() || press_.released || dirty_)
+        return;  // dirty: buttons_ belong to the previous screen until the next render
+    const Button *b = hit(x, y);
+    if (!b)
+        return;
+    press_ = Press();
+    press_.active = true;
+    press_.r = b->r & cv::Rect(0, 0, w_, h_);
+    press_.at = cv::Point(x, y);
+    press_.t0 = util::mono_ms();
+    press_.fn = b->on_tap;
+}
+
+// Finger slid off the button (with some slack): the tap will not happen.
+void Menu::drag(int x, int y)
+{
+    if (!press_.active || press_.released)
+        return;
+    cv::Rect slack(press_.r.x - 3 * u_, press_.r.y - 3 * u_, press_.r.width + 6 * u_, press_.r.height + 6 * u_);
+    if (!slack.contains(cv::Point(x, y)))
+        cancel_press();
+}
+
+void Menu::release(int x, int y)
+{
+    drag(x, y);
+    if (!press_.active || press_.released)
+        return;
+    press_.released = true;
+    press_.t_up = util::mono_ms();
+}
+
+void Menu::cancel_press()
+{
+    if (!press_.active || press_.released)
+        return;
+    if (!press_.under.empty()) {
+        restore_r_ = press_.r;
+        restore_img_ = press_.under;
+    }
+    press_ = Press();
+}
+
+bool Menu::tick(int64_t now)
+{
+    if (press_.released && now - press_.t_up >= kReleaseMs) {
+        auto fn = press_.fn;
+        press_ = Press();
+        if (fn)
+            fn();
+        dirty_ = true;
+    }
+    if (now - status_t_ >= 1000) {
+        status_t_ = now;
+        if (refresh_status())
+            dirty_ = true;
+    }
+    return dirty_ || !restore_img_.empty() || animating();
+}
+
+bool Menu::animating() const
+{
+    if (playing_)
+        return true;  // new video frames; draw_play copies only when one arrived
+    int64_t now = util::mono_ms();
+    if (press_.active && (press_.released || press_.under.empty() || now - press_.t0 < kGrowMs + 40))
+        return true;
+    return busy_.load() && now - busy_frame_ >= 66;  // spinner at ~15 fps
+}
+
+static float ease_out(float t)
+{
+    t = std::max(0.f, std::min(1.f, t));
+    return 1 - (1 - t) * (1 - t) * (1 - t);
+}
+
+// Lighter button, a ripple from the finger and an accent outline; on release
+// the whole button flashes before the action runs.
+cv::Rect Menu::draw_press(cv::Mat &c, int64_t now)
+{
+    if (!press_.active)
+        return cv::Rect();
+    cv::Mat roi = c(press_.r);
+    const cv::Point o = press_.at - press_.r.tl();
+    const int w = roi.cols, h = roi.rows;
+    float reach = std::sqrt((float)std::max(o.x, w - o.x) * std::max(o.x, w - o.x) +
+                            (float)std::max(o.y, h - o.y) * std::max(o.y, h - o.y));
+    float grow = ease_out((now - press_.t0) / (float)kGrowMs);
+    float light = 0.12f, ripple = 0.16f;
+    if (press_.released) {
+        float u = (now - press_.t_up) / (float)kReleaseMs;
+        grow = 1;
+        light = 0.30f - 0.12f * std::min(1.f, u);
+    }
+    roi.convertTo(roi, -1, 1 - light, 255 * light);
+    int rad = (int)(reach * (0.25f + 0.75f * grow));
+    if (rad > 0 && !press_.released) {
+        cv::Mat tmp = roi.clone();
+        cv::circle(tmp, o, rad, cv::Scalar(255, 255, 255, 255), cv::FILLED, cv::LINE_AA);
+        cv::addWeighted(roi, 1 - ripple, tmp, ripple, 0, roi);
+    }
+    int t = std::max(2, u_ / 2);
+    cv::rectangle(roi, cv::Rect(t / 2, t / 2, w - t, h - t), kAccent, t);
+    return press_.r;
+}
+
+// "Searching…" panel with a spinning arc.
+cv::Rect Menu::draw_busy(cv::Mat &c, int64_t now)
+{
+    if (!busy_.load())
+        return cv::Rect();
+    busy_frame_ = now;
+    cv::Rect r(w_ / 2 - 32 * u_, h_ / 2 - 8 * u_, 64 * u_, 16 * u_);
+    cv::rectangle(c, r, kPanel, cv::FILLED);
+    cv::rectangle(c, r, kKey, 2);
+    cv::Point ctr(r.x + 9 * u_, r.y + r.height / 2);
+    int rad = 4 * u_, th = std::max(3, u_ * 6 / 10);
+    cv::circle(c, ctr, rad, kKey, th, cv::LINE_AA);
+    double a = (now % 1000) * 360.0 / 1000;
+    cv::ellipse(c, ctr, cv::Size(rad, rad), a, 0, 100, kAccent, th, cv::LINE_AA);
+    int px = 5 * u_;
+    text_->draw(c, screen_ == MESSAGE ? "Подключение…" : "Поиск сетей…",
+                cv::Point(r.x + 17 * u_, r.y + (r.height + px * 72 / 100) / 2), px, kText);
+    return r;
 }
 
 // ---------------------------------------------------------------- main
@@ -92,14 +277,9 @@ void Menu::layout_main(cv::Mat &c)
 {
     header(c, "K510");
     int y = 18 * u_;
-    std::string eth = util::iface_ip("eth0"), wl = util::iface_ip("wlan0");
-    std::string net = (eth.empty() ? "" : "Кабель: " + eth + "   ") + (wl.empty() ? "" : "Wi-Fi: " + wl);
-    text_->draw(c, net.empty() ? "Сети нет" : net, cv::Point(4 * u_, y), 4 * u_, kMuted);
+    text_->draw(c, net_line_.empty() ? "Сети нет" : net_line_, cv::Point(4 * u_, y), 4 * u_, kMuted);
     y += 6 * u_;
-    std::string sys;
-    util::read_file(SYS_STATUS_PATH, sys);
-    while (!sys.empty() && (sys.back() == '\n' || sys.back() == '\r'))
-        sys.pop_back();
+    const std::string &sys = sys_line_;
     if (!error_.empty()) {
         text_->draw(c, error_, cv::Point(4 * u_, y), 3 * u_, kWarn);
         y += 5 * u_;
@@ -133,10 +313,15 @@ void Menu::layout_main(cv::Mat &c)
     });
     button(c, cv::Rect(6 * u_ + half, by, half, 12 * u_), "Галерея", 0, [this] {
         gal_days_.clear();
-        for (auto &d : util::list_dir("/root/data/parking/photos"))
-            if (d.size() == 10 && d[4] == '-' && util::is_dir("/root/data/parking/photos/" + d))
-                gal_days_.insert(gal_days_.begin(), d);  // newest first
+        // days with photos or videos, newest first
+        for (const char *root : {"/root/data/parking/photos", "/root/data/parking/videos"})
+            for (auto &d : util::list_dir(root))
+                if (d.size() == 10 && d[4] == '-' && util::is_dir(std::string(root) + "/" + d) &&
+                    std::find(gal_days_.begin(), gal_days_.end(), d) == gal_days_.end())
+                    gal_days_.push_back(d);
+        std::sort(gal_days_.rbegin(), gal_days_.rend());
         gal_days_page_ = 0;
+        gal_day_counts_.clear();
         screen_ = GAL_DAYS;
     });
     by += 14 * u_;

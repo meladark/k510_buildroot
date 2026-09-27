@@ -1,0 +1,3 @@
+FROM ghcr.io/kendryte/k510_env:latest
+COPY nncase-1.9.0.20230322-cp38-cp38-manylinux_2_24_x86_64.whl nncase_k510-1.9.0.20230323-py2.py3-none-manylinux_2_24_x86_64.whl /tmp/
+RUN pip3 install --no-cache-dir /tmp/nncase-1.9.0.20230322-cp38-cp38-manylinux_2_24_x86_64.whl /tmp/nncase_k510-1.9.0.20230323-py2.py3-none-manylinux_2_24_x86_64.whl pillow && rm /tmp/*.whl

@@ -13,6 +13,8 @@
 
 #include "util.h"
 
+int shm_reclaim();  // shm_guard.cc
+
 static const char *kAppDirs[] = {"/app/launcher/apps", "/root/data/apps"};
 
 std::vector<App> load_apps()
@@ -46,6 +48,10 @@ std::vector<App> load_apps()
                     a.cwd = v;
                 else if (k == "action_url")
                     a.action_url = v;
+                else if (k == "action_long_url")
+                    a.action_long_url = v;
+                else if (k == "config")
+                    a.config = v;
                 else if (k == "env" && v.find('=') != std::string::npos)
                     a.env.push_back(v);
                 else if (k == "exec") {
@@ -82,6 +88,8 @@ bool Supervisor::start(const App &app)
 
 bool Supervisor::spawn()
 {
+    util::defrag_memory();  // the app allocates its display buffers right away
+    shm_reclaim();          // KPU/ISP memory the previous run did not return
     util::mkdirs(LOG_DIR);
     std::string log = std::string(LOG_DIR) + "/" + app_.id + ".log";
     if (util::file_size(log) > 2000000)

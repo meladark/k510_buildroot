@@ -18,7 +18,9 @@ public:
 
     // Takes a photo of all running cameras now (stacked, cam0 on top);
     // returns the path relative to PHOTOS_DIR or "".
-    std::string capture(const std::string &reason);
+    // cam/dets: draw these detections for that camera instead of the current
+    // ones (the trigger passes the frame that fired; the photo comes ~1 s later).
+    std::string capture(const std::string &reason, int cam = -1, const std::vector<Detection> *dets = nullptr);
     // Current frame as JPEG for the web editor (not stored).
     bool live_jpeg(int cam, int quality, std::vector<unsigned char> &out);
 

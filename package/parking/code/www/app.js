@@ -15,6 +15,13 @@ const api = async (method, url, body) => {
 };
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
+// Spinner on the button while its request runs; ignores repeated clicks.
+const working = async (btn, fn) => {
+  if (btn.classList.contains('working')) return;
+  btn.classList.add('working');
+  try { await fn(); } finally { btn.classList.remove('working'); }
+};
+
 let msgTimer = 0;
 function toast(text, err) {
   const m = $('#msg');
@@ -35,10 +42,46 @@ function showTab(t) {
   if (t === 'photos') photos.load();
   if (t === 'net') net.status();
   if (t === 'settings') settings.load();
+  if (t === 'models') models.load();
+  if (t === 'videos') videos.load();
   try { localStorage.setItem('tab', t); } catch (e) { /* private mode */ }
 }
 
 // ---------------------------------------------------------------- drawing helpers
+// point connections per PointShape (model.h): 2 plate, 3 hand, 4 COCO body, 5 OpenPose, 6 head axes
+const SHAPE_EDGES = {
+  2: [[0, 1], [1, 2], [2, 3], [3, 0]],
+  3: [[0, 1], [1, 2], [2, 3], [3, 4], [0, 5], [5, 6], [6, 7], [7, 8], [0, 9], [9, 10], [10, 11], [11, 12],
+    [0, 13], [13, 14], [14, 15], [15, 16], [0, 17], [17, 18], [18, 19], [19, 20]],
+  4: [[15, 13], [13, 11], [16, 14], [14, 12], [11, 12], [5, 11], [6, 12], [5, 6], [5, 7], [6, 8], [7, 9], [8, 10],
+    [1, 2], [0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 6]],
+  5: [[1, 2], [1, 5], [2, 3], [3, 4], [5, 6], [6, 7], [1, 8], [8, 9], [9, 10], [1, 11], [11, 12], [12, 13], [1, 0],
+    [0, 14], [14, 16], [0, 15], [15, 17]],
+  6: [[0, 1], [0, 2], [0, 3]],
+};
+function drawPoints(ctx, w, h, pts, shape) {
+  const ok = (k) => 2 * k + 1 < pts.length && pts[2 * k] >= 0;
+  const P = (k) => [pts[2 * k] * w, pts[2 * k + 1] * h];
+  const axis = ['#ef4444', '#22c55e', '#3b82f6'];
+  (SHAPE_EDGES[shape] || []).forEach(([a, b], i) => {
+    if (!ok(a) || !ok(b)) return;
+    ctx.strokeStyle = shape === 6 ? axis[i % 3] : '#facc15';
+    ctx.beginPath();
+    ctx.moveTo(...P(a));
+    ctx.lineTo(...P(b));
+    ctx.stroke();
+  });
+  if (shape === 6) return;
+  ctx.fillStyle = '#facc15';
+  const r = Math.max(2, w / (pts.length > 60 ? 600 : 300));
+  for (let k = 0; 2 * k + 1 < pts.length; k++) {
+    if (!ok(k)) continue;
+    ctx.beginPath();
+    ctx.arc(...P(k), r, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+}
+
 function drawSpots(ctx, w, h, spots, cam, opts = {}) {
   for (const s of spots) {
     if (s.cam !== cam || s.points.length < 2) continue;
@@ -111,8 +154,17 @@ const status = {
     const spots = d.spots;
     const free = spots.filter((s) => !s.occupied).length;
     const ip = [d.eth0 && 'eth ' + d.eth0, d.wlan0 && 'wifi ' + d.wlan0].filter(Boolean).join(', ') || 'нет сети';
-    $('#summary').textContent =
-      `${d.time_str}${d.clock_ok ? '' : ' (время не синхронизировано)'} · свободно ${free} из ${spots.length} · ${ip} · SD свободно ${d.disk_free_pct}%`;
+    const trig = d.mode === 'trigger';
+    document.body.classList.toggle('mode-trigger', trig);
+    $('#app-title').textContent = trig ? 'K510 Триггер' : 'K510 Парковка';
+    $('#summary').textContent = `${d.time_str}${d.clock_ok ? '' : ' (время не синхронизировано)'} · ` +
+      (trig ? `срабатываний ${d.trigger_count}` : `свободно ${free} из ${spots.length}`) + ` · ${ip} · SD свободно ${d.disk_free_pct}%`;
+    if (trig) {
+      const rec = d.recording_s >= 0 ? ` · <b>идёт запись ${d.recording_s} с</b>` : '';
+      $('#trg-state').innerHTML = `Срабатываний: <b>${d.trigger_count}</b>` +
+        (d.trigger_last ? ` · последнее: ${esc(d.trigger_last)}` : ' · пока не было') + rec +
+        '<div class="hint">Фото с рамками — во вкладке «Фото», видео — во вкладке «Видео».</div>';
+    }
     if (d.message && d.message !== this.lastMsg) toast(d.message);
     this.lastMsg = d.message;
     if (currentTab !== 'status') return;
@@ -136,8 +188,10 @@ const status = {
         ctx.strokeRect(x1 * w, y1 * h, (x2 - x1) * w, (y2 - y1) * h);
         ctx.fillStyle = '#facc15';
         ctx.fillText(`${det.name} ${det.score.toFixed(2)}`, x1 * w + 3, y1 * h + 3);
+        if (det.text) ctx.fillText(det.text, x1 * w + 3, y2 * h + 3);
+        if (det.pts) drawPoints(ctx, w, h, det.pts, det.shape);
       }
-      $('#st-lbl' + i).textContent = `Камера ${i} · ${c.running ? c.fps.toFixed(1) + ' к/с' : 'не работает'}`;
+      $('#st-lbl' + i).textContent = `Камера ${i} · ${c.running ? c.fps.toFixed(1) + ' к/с · ' + (c.infer_ms + c.post_ms).toFixed(0) + ' мс' : 'не работает'}`;
     });
     const tb = $('#spots-body');
     tb.innerHTML = spots.map((s) => {
@@ -153,6 +207,10 @@ const status = {
     try {
       this.data = await api('GET', '/api/status');
       this.render();
+      // recording started/stopped from the board key: keep the Video tab in sync
+      const was = videos.rec, rs = this.data.recording_s;
+      videos.setRec(rs >= 0, rs);
+      if (was && rs < 0 && currentTab === 'videos') videos.load();
     } catch (e) { /* board restarting */ }
     setTimeout(() => this.poll(), 1500);
   },
@@ -318,14 +376,14 @@ $('#ed-rename').addEventListener('click', () => {
   editor.dirty = true;
   editor.draw();
 });
-$('#ed-save').addEventListener('click', async () => {
+$('#ed-save').addEventListener('click', (ev) => working(ev.currentTarget, async () => {
   try {
     const r = await api('PUT', '/api/spots', { spots: editor.spots.map(({ id, cam, points }) => ({ id, cam, points })) });
     editor.dirty = false;
     editor.draw();
     toast(`Сохранено мест: ${r.count}`);
   } catch (e) { toast(e.message, true); }
-});
+}));
 document.addEventListener('keydown', (ev) => {
   if (currentTab !== 'spots' || ev.target.tagName === 'INPUT') return;
   if (ev.key === 'Backspace') { ev.preventDefault(); editor.draft.pop(); editor.draw(); }
@@ -375,14 +433,14 @@ $('#ph-grid').addEventListener('click', async (ev) => {
     photos.load();
   } catch (e) { toast(e.message, true); }
 });
-$('#ph-capture').addEventListener('click', async () => {
+$('#ph-capture').addEventListener('click', (ev) => working(ev.currentTarget, async () => {
   try {
     const r = await api('POST', '/api/photos/capture');
     toast('Снято: ' + (r.files.join(', ') || 'нет кадров'));
     photos.day = null;
     photos.load();
   } catch (e) { toast(e.message, true); }
-});
+}));
 const updArchive = () => {
   const q = new URLSearchParams();
   if ($('#ph-from').value) q.set('from', $('#ph-from').value);
@@ -406,6 +464,7 @@ const net = {
   },
   async scan() {
     $('#net-scan').disabled = true;
+    $('#net-scan').classList.add('working');
     $('#net-list').innerHTML = '<li class="hint">Поиск…</li>';
     try {
       const r = await api('GET', '/api/wifi/scan');
@@ -415,6 +474,7 @@ const net = {
         '<li class="hint">Сети не найдены</li>';
     } catch (e) { toast(e.message, true); }
     $('#net-scan').disabled = false;
+    $('#net-scan').classList.remove('working');
   },
 };
 $('#net-scan').addEventListener('click', () => net.scan());
@@ -432,6 +492,7 @@ $('#net-form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
   const btn = ev.target.querySelector('button');
   btn.disabled = true;
+  btn.classList.add('working');
   toast('Подключение… (до 30 секунд; в режиме точки доступа связь со страницей пропадёт)');
   try {
     const r = await api('POST', '/api/wifi/connect', { ssid: $('#net-ssid').textContent, psk: $('#net-psk').value });
@@ -440,6 +501,7 @@ $('#net-form').addEventListener('submit', async (ev) => {
     net.status();
   } catch (e) { toast(e.message, true); }
   btn.disabled = false;
+  btn.classList.remove('working');
 });
 
 // ---------------------------------------------------------------- settings
@@ -452,7 +514,8 @@ const settings = {
       f.cam0.checked = c.cam_enabled[0];
       f.cam1.checked = c.cam_enabled[1];
       for (const k of ['ai_fps', 'obj_thresh', 'occupancy_threshold', 'footprint', 'debounce', 'photo_interval_min',
-        'jpeg_quality', 'min_free_pct']) f[k].value = c[k];
+        'jpeg_quality', 'min_free_pct', 'video_max_min', 'trigger_ai_cam', 'trigger_video_s', 'trigger_confirm']) f[k].value = c[k];
+      f.trigger_classes.value = (c.trigger_classes || []).join(', ');
       f.vehicle_classes.value = c.vehicle_classes.join(', ');
       f.draw_classes.value = c.draw_classes.join(', ');
       f.photo_res.value = `${c.photo_width}x${c.photo_height}`;
@@ -480,6 +543,11 @@ $('#cfg-form').addEventListener('submit', async (ev) => {
     jpeg_quality: +f.jpeg_quality.value,
     keep_raw: f.keep_raw.checked,
     min_free_pct: +f.min_free_pct.value,
+    video_max_min: +f.video_max_min.value,
+    trigger_ai_cam: +f.trigger_ai_cam.value,
+    trigger_video_s: +f.trigger_video_s.value,
+    trigger_confirm: +f.trigger_confirm.value,
+    trigger_classes: list(f.trigger_classes.value),
   });
   try {
     const r = await api('PUT', '/api/config', c);
@@ -488,13 +556,129 @@ $('#cfg-form').addEventListener('submit', async (ev) => {
     toast(r.restart_required ? 'Сохранено. Часть настроек применится после перезапуска.' : 'Сохранено');
   } catch (e) { toast(e.message, true); }
 });
-$('#cfg-restart').addEventListener('click', async () => {
+$('#cfg-restart').addEventListener('click', (ev) => working(ev.currentTarget, async () => {
   try {
     await api('POST', '/api/restart');
     toast('Перезапуск… страница обновится сама');
     $('#cfg-restart').classList.add('hidden');
     status.camsBuilt = false;
   } catch (e) { toast(e.message, true); }
+}));
+
+// ---------------------------------------------------------------- videos
+const fmtSize = (b) => b > 1e9 ? (b / 1e9).toFixed(1) + ' ГБ' : (b / 1e6).toFixed(1) + ' МБ';
+const videos = {
+  timer: 0,
+  async load() {
+    try {
+      const d = await api('GET', '/api/videos');
+      this.setRec(d.recording);
+      // group files by recording (HHMMSS), then by camera
+      $('#vd-list').innerHTML = d.days.map(({ day, files }) => {
+        const recs = {};
+        for (const f of files) {
+          const m = f.name.match(/^(\d{6})_cam(\d)\.(mp4|jpg)$/);
+          if (!m) continue;
+          const r = recs[m[1]] = recs[m[1]] || {};
+          const c = r[m[2]] = r[m[2]] || {};
+          if (m[3] === 'mp4') c.size = f.size; else c.poster = true;
+        }
+        const names = Object.keys(recs).sort().reverse();
+        if (!names.length) return '';
+        return `<h2>${esc(day)}</h2>` + names.map((n) => {
+          const t = `${n.slice(0, 2)}:${n.slice(2, 4)}:${n.slice(4, 6)}`;
+          const cams = Object.keys(recs[n]).sort().filter((c) => recs[n][c].size !== undefined);
+          return `<div class="card"><div class="toolbar"><b>${t}</b>
+              <button data-vdel="${day}/${n}">Удалить</button></div>
+            <div class="cams">${cams.map((c) => {
+              const base = `/videos/${day}/${n}_cam${c}`;
+              return `<div><video controls preload="none" style="width:100%;border-radius:8px;background:#000"
+                  ${recs[n][c].poster ? `poster="${base}.jpg"` : ''} src="${base}.mp4"></video>
+                <div class="hint">Камера ${c} · ${fmtSize(recs[n][c].size)} ·
+                  <a href="${base}.mp4" download>скачать</a></div></div>`;
+            }).join('')}</div></div>`;
+        }).join('');
+      }).join('') || '<p class="hint">Видео пока нет</p>';
+    } catch (e) { toast(e.message, true); }
+  },
+  setRec(on, seconds) {
+    this.rec = on;
+    $('#vd-rec').textContent = on ? '■ Остановить запись' : '● Начать запись';
+    $('#vd-rec').classList.toggle('primary', !on);
+    $('#vd-state').textContent = on && seconds >= 0
+      ? `идёт запись ${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}` : '';
+  },
+};
+$('#vd-rec').addEventListener('click', (ev) => working(ev.currentTarget, async () => {
+  try {
+    await api('POST', videos.rec ? '/api/video/stop' : '/api/video/start');
+    toast(videos.rec ? 'Видео сохранено' : 'Запись началась');
+    await videos.load();
+  } catch (e) { toast(e.message, true); }
+}));
+$('#vd-list').addEventListener('click', async (ev) => {
+  const b = ev.target.closest('button[data-vdel]');
+  if (!b) return;
+  const [date, name] = b.dataset.vdel.split('/');
+  if (!confirm(`Удалить видео ${date} ${name.slice(0, 2)}:${name.slice(2, 4)}:${name.slice(4)} (все камеры)?`)) return;
+  try {
+    await api('POST', `/api/videos/delete?date=${date}&name=${name}`);
+    videos.load();
+  } catch (e) { toast(e.message, true); }
+});
+
+// ---------------------------------------------------------------- models
+const models = {
+  async load() {
+    try {
+      const [r, st] = await Promise.all([api('GET', '/api/models'), api('GET', '/api/status')]);
+      const bench = {};
+      for (const b of (r.bench && r.bench.models) || []) bench[b.id] = b;
+      const cams = st.cams.filter((c) => c.running);
+      const ms = cams.length ? cams.map((c) => (c.infer_ms + c.post_ms).toFixed(0) + ' мс').join(' / ') : '—';
+      $('#md-current').innerHTML = `Сейчас работает: <b>${esc(st.model_title || r.running || '—')}</b> · на кадр ${ms}` +
+        (r.configured && r.configured !== r.running ? `<div class="hint">В настройках выбрана ${esc(r.configured)}, ` +
+          'но она не загрузилась — см. лог.</div>' : '');
+      const found = (b) => {
+        if (!b) return '<span class="hint">нет замера</span>';
+        const n = {};
+        for (const d of b.dets) n[d.name] = (n[d.name] || 0) + 1;
+        const texts = b.dets.map((d) => d.text).filter(Boolean);
+        return esc(Object.entries(n).map(([k, v]) => v > 1 ? `${k} ×${v}` : k).join(', ') || '—') +
+          (texts.length ? `<div class="hint">${esc(texts.join(' · '))}</div>` : '');
+      };
+      $('#md-table tbody').innerHTML = r.models.map((m) => {
+        const b = bench[m.id];
+        const cur = m.id === r.running;
+        return `<tr${cur ? ' class="state-free"' : ''}><td>${esc(m.title)}<div class="hint">${esc(m.what)}` +
+          `${m.note ? ' · <b>' + esc(m.note) + '</b>' : ''}</div><div class="hint">${esc(m.id)}</div></td>
+          <td>${(m.size / 1e6).toFixed(1)} МБ</td>
+          <td>${b ? b.infer_ms.toFixed(1) : ''}</td><td>${b ? b.post_ms.toFixed(1) : ''}</td>
+          <td>${b ? (1000 / (b.infer_ms + b.post_ms)).toFixed(1) : ''}</td><td>${found(b)}</td>
+          <td>${cur ? '✓ работает' : `<button data-use="${esc(m.id)}">Включить</button>`}</td></tr>`;
+      }).join('');
+      const withPic = r.models.filter((m) => bench[m.id]);
+      $('#md-bench-title').classList.toggle('hidden', !withPic.length);
+      const t = r.bench ? r.bench.ts : 0;
+      $('#md-bench').innerHTML = withPic.map((m) =>
+        `<a href="/bench/${encodeURIComponent(m.id)}.jpg?t=${t}" target="_blank"><img loading="lazy" src="/bench/${encodeURIComponent(m.id)}.jpg?t=${t}">` +
+        `<span>${esc(m.title)} · ${bench[m.id].infer_ms.toFixed(0)} мс</span></a>`).join('');
+    } catch (e) { toast(e.message, true); }
+  },
+};
+$('#md-table').addEventListener('click', (ev) => {
+  const b = ev.target.closest('button[data-use]');
+  if (!b) return;
+  working(b, async () => {
+    try {
+      const cfg = await api('GET', '/api/config');
+      cfg.model = b.dataset.use;
+      await api('PUT', '/api/config', cfg);
+      await api('POST', '/api/restart');
+      toast('Модель выбрана, приложение перезапускается (~15 с)…');
+      setTimeout(() => { status.camsBuilt = false; models.load(); }, 15000);
+    } catch (e) { toast(e.message, true); }
+  });
 });
 
 // launcher page (app switching) lives on :8080 of the same host

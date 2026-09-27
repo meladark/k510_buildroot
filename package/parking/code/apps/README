@@ -7,7 +7,9 @@ Shipped apps live in /app/launcher/apps, your own go to /root/data/apps
   exec=/absolute/path/to/binary arg1 arg2      (split on spaces, no quoting)
   cwd=/working/directory
   env=NAME=value                                (optional, may repeat)
-  action_url=http://127.0.0.1/some/endpoint     (optional, POST on the board action key)
+  action_url=http://127.0.0.1/some/endpoint     (optional, POST on a short press of the action key)
+  action_long_url=http://127.0.0.1/other        (optional, POST when the action key is held 1 s)
+  config=/root/data/<app>/config.json           (optional, edited by the touch menu "Настройки камер")
 
 The app gets the display and cameras exclusively. It is stopped with SIGINT,
 then SIGTERM, then SIGKILL (whole process group). Exit code 3 = restart me.

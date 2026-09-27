@@ -5,7 +5,9 @@
 
 #include <rapidjson/document.h>
 
+#include "model.h"
 #include "photos.h"
+#include "video.h"
 #include "state.h"
 #include "util.h"
 #include "wifi.h"
@@ -38,26 +40,44 @@ static std::string status_json()
     std::string msg = g_state.status_msg;
     if (!sys.empty())
         msg += (msg.empty() ? "" : " · ") + sys;
-    char head[512];
+    char head[1536];
     snprintf(head, sizeof(head),
              "{\"time\":%lld,\"time_str\":\"%s\",\"clock_ok\":%s,\"eth0\":\"%s\",\"wlan0\":\"%s\","
-             "\"disk_free_pct\":%.1f,\"message\":\"%s\",\"cams\":[",
+             "\"disk_free_pct\":%.1f,\"message\":\"%s\",\"model\":\"%s\",\"model_title\":\"%s\","
+             "\"recording_s\":%d,\"mode\":\"%s\",\"trigger_last\":\"%s\",\"trigger_count\":%d,\"cams\":[",
              (long long)util::now_ms(), util::time_str(util::now_ms(), "%Y-%m-%d %H:%M:%S").c_str(),
              util::clock_is_sane() ? "true" : "false", ip_eth.c_str(), ip_wlan.c_str(), disk,
-             util::json_escape(msg).c_str());
+             util::json_escape(msg).c_str(), util::json_escape(g_state.model_id).c_str(),
+             util::json_escape(g_state.model_title).c_str(),
+             g_state.rec_started_ms ? (int)((util::mono_ms() - g_state.rec_started_ms) / 1000) : -1,
+             g_state.trigger_mode ? "trigger" : "parking", util::json_escape(g_state.trigger_last).c_str(),
+             g_state.trigger_count);
     std::string o = head;
     for (int c = 0; c < NUM_CAMS; c++) {
         const CamState &cs = g_state.cams[c];
         char b[256];
-        snprintf(b, sizeof(b), "%s{\"enabled\":%s,\"running\":%s,\"fps\":%.1f,\"frames\":%llu,\"dets\":[",
+        snprintf(b, sizeof(b),
+                 "%s{\"enabled\":%s,\"running\":%s,\"fps\":%.1f,\"frames\":%llu,\"infer_ms\":%.1f,"
+                 "\"post_ms\":%.1f,\"dets\":[",
                  c ? "," : "", g_state.cfg.cam_enabled[c] ? "true" : "false", cs.running ? "true" : "false",
-                 cs.fps, (unsigned long long)cs.frames);
+                 cs.fps, (unsigned long long)cs.frames, cs.infer_ms, cs.post_ms);
         o += b;
         for (size_t i = 0; i < cs.dets.size(); i++) {
             const Detection &d = cs.dets[i];
-            snprintf(b, sizeof(b), "%s{\"name\":\"%s\",\"score\":%.2f,\"box\":[%.4f,%.4f,%.4f,%.4f]}",
-                     i ? "," : "", d.name.c_str(), d.score, d.x1, d.y1, d.x2, d.y2);
+            snprintf(b, sizeof(b), "%s{\"name\":\"%s\",\"score\":%.2f,\"box\":[%.4f,%.4f,%.4f,%.4f],\"shape\":%d",
+                     i ? "," : "", util::json_escape(d.name).c_str(), d.score, d.x1, d.y1, d.x2, d.y2, d.shape);
             o += b;
+            if (!d.text.empty())
+                o += ",\"text\":\"" + util::json_escape(d.text) + "\"";
+            if (!d.pts.empty()) {
+                o += ",\"pts\":[";
+                for (size_t k = 0; k < d.pts.size(); k++) {
+                    snprintf(b, sizeof(b), "%s%.3f", k ? "," : "", d.pts[k]);
+                    o += b;
+                }
+                o += "]";
+            }
+            o += "}";
         }
         o += "]}";
     }
@@ -75,7 +95,7 @@ static bool parse_body(const Request &req, rapidjson::Document &d)
     return !d.HasParseError() && d.IsObject();
 }
 
-int WebServer::start(int port, const char *www_dir, Photos *photos)
+int WebServer::start(int port, const char *www_dir, Photos *photos, VideoRecorder *video)
 {
     Server *svr = new Server();
     svr_ = svr;
@@ -112,6 +132,39 @@ int WebServer::start(int port, const char *www_dir, Photos *photos)
         json_reply(res, "{\"ok\":true,\"count\":" + std::to_string(g_state.spots.size()) + "}");
     });
 
+    // installed models, the configured one and the last `parking --bench` table
+    svr->Get("/api/models", [](const Request &, Response &res) {
+        std::string cur, running;
+        {
+            std::lock_guard<std::mutex> lk(g_state.mtx);
+            cur = g_state.cfg.model;
+            running = g_state.model_id;
+        }
+        ModelInfo cm;
+        if (find_model(cur, cm))
+            cur = cm.id;  // old configs store the kmodel path
+        std::string o = "{\"configured\":\"" + util::json_escape(cur) + "\",\"running\":\"" +
+                        util::json_escape(running) + "\",\"models\":[";
+        bool first = true;
+        for (auto &m : list_models()) {
+            char b[512];
+            snprintf(b, sizeof(b),
+                     "%s{\"id\":\"%s\",\"title\":\"%s\",\"family\":\"%s\",\"quant\":\"%s\",\"input\":%d,"
+                     "\"size\":%ld,\"coco\":%s,",
+                     first ? "" : ",", util::json_escape(m.id).c_str(), util::json_escape(m.title()).c_str(),
+                     m.family.c_str(), m.quant.c_str(), m.input_w, m.file_size, m.coco ? "true" : "false");
+            o += b;
+            o += "\"what\":\"" + util::json_escape(m.what) + "\",\"note\":\"" + util::json_escape(m.note) + "\"}";
+            first = false;
+        }
+        std::string bench;
+        if (!util::read_file(DATA_DIR "/bench.json", bench) || bench.empty())
+            bench = "null";
+        json_reply(res, o + "],\"bench\":" + bench + "}");
+    });
+    util::mkdirs(DATA_DIR "/bench");
+    svr->set_mount_point("/bench", DATA_DIR "/bench");
+
     svr->Get("/api/config", [](const Request &, Response &res) {
         std::lock_guard<std::mutex> lk(g_state.mtx);
         json_reply(res, g_state.cfg.to_json());
@@ -125,12 +178,13 @@ int WebServer::start(int port, const char *www_dir, Photos *photos)
             return json_error(res, err);
         // these are read once at start-up
         bool restart = c.model != g_state.cfg.model || c.net_len != g_state.cfg.net_len ||
+                       c.trigger_ai_cam != g_state.cfg.trigger_ai_cam ||
                        c.obj_thresh != g_state.cfg.obj_thresh || c.nms_thresh != g_state.cfg.nms_thresh ||
                        c.cam_enabled[0] != g_state.cfg.cam_enabled[0] ||
                        c.cam_enabled[1] != g_state.cfg.cam_enabled[1] ||
                        c.photo_width != g_state.cfg.photo_width || c.photo_height != g_state.cfg.photo_height ||
                        c.web_port != g_state.cfg.web_port;
-        if (!c.save(CONFIG_PATH))
+        if (!c.save(g_config_path))
             return json_error(res, "не удалось сохранить на SD", 500);
         g_state.cfg = c;
         json_reply(res, std::string("{\"ok\":true,\"restart_required\":") + (restart ? "true" : "false") + "}");
@@ -166,6 +220,81 @@ int WebServer::start(int port, const char *www_dir, Photos *photos)
         }
         json_reply(res, o);
     });
+
+    // Board keys (via the launcher). Short press: photo, or stop a running
+    // recording. Long press: start / stop video.
+    auto toast = [](const std::string &t) {
+        std::lock_guard<std::mutex> lk(g_state.mtx);
+        g_state.toast = t;
+        g_state.toast_until_ms = util::mono_ms() + 2500;
+    };
+    auto video_start = [video, toast]() {
+        int max_s;
+        {
+            std::lock_guard<std::mutex> lk(g_state.mtx);
+            max_s = g_state.cfg.video_max_min * 60;
+        }
+        std::string name = video->start(max_s);
+        toast(name.empty() ? "Видео не записывается" : "Запись видео");
+        return name;
+    };
+    auto video_stop = [video, toast]() {
+        video->stop();
+        toast("Видео сохранено");
+    };
+    svr->Post("/api/action", [photos, video, video_stop, toast](const Request &, Response &res) {
+        if (video->recording()) {
+            video_stop();
+            return json_reply(res, "{\"ok\":true,\"video\":\"stopped\"}");
+        }
+        std::string p = photos->capture("button");
+        toast(p.empty() ? "Снимок не удался" : "Снимок сохранён");
+        json_reply(res, "{\"ok\":true,\"photo\":\"" + p + "\"}");
+    });
+    svr->Post("/api/video/toggle", [video, video_start, video_stop](const Request &, Response &res) {
+        if (video->recording()) {
+            video_stop();
+            return json_reply(res, "{\"ok\":true,\"recording\":false}");
+        }
+        std::string n = video_start();
+        json_reply(res, std::string("{\"ok\":") + (n.empty() ? "false" : "true") + ",\"recording\":" +
+                            (n.empty() ? "false" : "true") + ",\"name\":\"" + n + "\"}");
+    });
+    svr->Post("/api/video/start", [video, video_start](const Request &, Response &res) {
+        std::string n = video->recording() ? "" : video_start();
+        if (n.empty() && !video->recording())
+            return json_error(res, "камеры не пишут (нет фото-канала?)");
+        json_reply(res, "{\"ok\":true,\"name\":\"" + n + "\"}");
+    });
+    svr->Post("/api/video/stop", [video, video_stop](const Request &, Response &res) {
+        if (video->recording())
+            video_stop();
+        json_reply(res, "{\"ok\":true}");
+    });
+    // recordings by day: [{day, items:[{name, cams:[0,1], poster:bool}]}]
+    svr->Get("/api/videos", [video](const Request &, Response &res) {
+        std::string o = "{\"recording\":" + std::string(video->recording() ? "true" : "false") + ",\"days\":[";
+        auto days = video->days();
+        std::reverse(days.begin(), days.end());
+        for (size_t d = 0; d < days.size(); d++) {
+            o += std::string(d ? "," : "") + "{\"day\":\"" + days[d] + "\",\"files\":[";
+            auto files = video->files(days[d]);
+            for (size_t i = 0; i < files.size(); i++) {
+                std::string path = std::string(VIDEOS_DIR) + "/" + days[d] + "/" + files[i];
+                o += std::string(i ? "," : "") + "{\"name\":\"" + util::json_escape(files[i]) +
+                     "\",\"size\":" + std::to_string(util::file_size(path)) + "}";
+            }
+            o += "]}";
+        }
+        json_reply(res, o + "]}");
+    });
+    svr->Post("/api/videos/delete", [video](const Request &req, Response &res) {
+        if (!video->remove(req.get_param_value("date"), req.get_param_value("name")))
+            return json_error(res, "нет такого видео");
+        json_reply(res, "{\"ok\":true}");
+    });
+    util::mkdirs(VIDEOS_DIR);
+    svr->set_mount_point("/videos", VIDEOS_DIR);
 
     svr->Post("/api/photos/capture", [photos](const Request &req, Response &res) {
         std::string o = "{\"files\":[";

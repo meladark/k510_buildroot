@@ -51,3 +51,33 @@ label.inline { flex-direction: row; align-items: center; gap: 6px; color: var(--
 .netlist li:hover { border-color: var(--accent); }
 .cfg fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 0 0 12px; padding: 8px 12px 12px; display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
 .cfg legend { font-weight: 600; padding: 0 4px; }
+
+/* press feedback: everything clickable reacts to hover and press */
+button, .button, .netlist li, .grid a, .days button {
+  transition: transform .08s ease, background-color .15s, border-color .15s, box-shadow .15s, color .15s, opacity .15s;
+  -webkit-tap-highlight-color: transparent;
+}
+button:not(:disabled):hover, .button:hover, .grid a:hover { border-color: var(--accent); }
+nav button:not(.active):hover { background: var(--card); color: var(--fg); }
+button.primary:not(:disabled):hover { filter: brightness(1.1); }
+button:not(:disabled):active, .button:active, .netlist li:active, .grid a:active { transform: scale(.96); }
+button.primary:not(:disabled):active { filter: brightness(.9); }
+button:focus-visible, .button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.grid a:hover img { opacity: .9; }
+button.working { position: relative; color: transparent !important; pointer-events: none; }
+button.working::after {
+  content: ""; position: absolute; inset: 0; margin: auto; width: 1em; height: 1em;
+  border: 2px solid var(--muted); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite;
+}
+button.primary.working::after { border-color: rgba(255,255,255,.4); border-top-color: #fff; }
+main > section:not(.hidden) { animation: appear .18s ease-out; }
+.msg:not(.hidden) { animation: appear .2s ease-out; }
+@keyframes appear { from { opacity: 0; transform: translateY(6px); } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
+
+/* two apps share this page: parking and trigger mode */
+body.mode-trigger .parking-only { display: none !important; }
+body:not(.mode-trigger) .trigger-only { display: none !important; }

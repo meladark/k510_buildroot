@@ -24,14 +24,22 @@ set(SRC
     src/wifi.cc
     src/text.cc
     src/canaan/v4l2.c
+    src/model.cc
+    src/engine.cc
+    src/canaan/pafprocess.cc
+    src/bench.cc
+    src/shm_guard.cc
+    src/video.cc
+    src/trigger.cc
     src/canaan/cv2_utils.cc
-    src/canaan/object_detect.cc
 )
 
 add_executable(parking ${SRC})
 target_link_libraries(parking mediactl drm pthread freetype)
 target_link_libraries(parking nncase.runtime nncase.rt_modules.k510)
 target_link_libraries(parking opencv_core opencv_imgcodecs opencv_imgproc)
+# video recording: hardware H.264 encoder (venc_lib), MP4 muxing (ffmpeg_canaan)
+target_link_libraries(parking venc avformat avcodec avutil)
 
 # Launcher: app switching, touch menu, Wi-Fi setup
 add_executable(launcher
@@ -39,18 +47,22 @@ add_executable(launcher
     src/launcher/apps.cc
     src/launcher/ui.cc
     src/launcher/ui_gallery.cc
+    src/launcher/player.cc
     src/text.cc
     src/touch.cc
     src/drm_out.cc
     src/wifi.cc
     src/util.cc
     src/state.cc
+    src/model.cc
+    src/shm_guard.cc
 )
 target_link_libraries(launcher drm freetype pthread opencv_core opencv_imgproc opencv_imgcodecs)
+target_link_libraries(launcher avformat avcodec avutil swscale)  # gallery video playback
 
 install(TARGETS parking DESTINATION .)
 install(TARGETS launcher DESTINATION /app/launcher)
-install(FILES apps/10-parking.conf apps/20-camera-view.conf apps/30-object-detect.conf apps/40-face-detect.conf
+install(FILES apps/10-parking.conf apps/15-trigger.conf apps/20-camera-view.conf apps/30-object-detect.conf apps/40-face-detect.conf
         apps/README DESTINATION /app/launcher/apps)
 install(FILES video_base.conf imx219_0.conf imx219_1.conf DESTINATION .)
 install(DIRECTORY www/ DESTINATION www)

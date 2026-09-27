@@ -1,0 +1,6 @@
+FROM python:3.10-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir torch==2.2.2+cpu torchvision==0.17.2+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir "numpy<2" ultralytics==8.3.40 onnx==1.16.1 onnxsim==0.4.36 onnxruntime==1.18.1 pandas seaborn gitpython
+RUN git clone --depth 1 --branch v7.0 https://github.com/ultralytics/yolov5 /opt/yolov5
+RUN pip install --no-cache-dir ipython

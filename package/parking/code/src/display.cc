@@ -8,6 +8,7 @@
 
 #include <opencv2/imgproc.hpp>
 
+#include "model.h"
 #include "spots.h"
 #include "util.h"
 
@@ -197,8 +198,27 @@ void Display::osd_loop()
 {
     const int W = drm_.width(), H = drm_.height();
     cv::Mat canvas(H, W, CV_8UC4, cv::Scalar(0, 0, 0, 0));
+    bool black[OSD_BUFS] = {false};  // buffer fully opaque black (screen off)
     while (!g_quit.load()) {
         int64_t t0 = util::mono_ms();
+        const bool off = access(SCREEN_OFF_PATH, F_OK) == 0;
+        if (off) {
+            // opaque black over the video planes; each buffer filled once
+            int idx = osdq_.acquire();
+            if (idx >= 0) {
+                DrmBuf &b = drm_.osd_buf(idx);
+                if (!black[idx]) {
+                    for (uint32_t y = 0; y < b.height; y++) {
+                        uint32_t *row = (uint32_t *)((uint8_t *)b.map + (size_t)y * b.pitch);
+                        std::fill(row, row + b.width, 0xFF000000u);
+                    }
+                    black[idx] = true;
+                }
+                osdq_.publish(idx);
+            }
+            usleep(250000);
+            continue;
+        }
         for (auto &r : regions_)
             canvas(cv::Rect(r.x, r.y, r.w, r.h)).setTo(cv::Scalar(0, 0, 0, 0));
         paint(canvas);
@@ -206,6 +226,11 @@ void Display::osd_loop()
         int idx = osdq_.acquire();
         if (idx >= 0) {
             DrmBuf &b = drm_.osd_buf(idx);
+            if (black[idx]) {  // back on: clear what the regions below do not cover
+                for (uint32_t y = 0; y < b.height; y++)
+                    memset((uint8_t *)b.map + (size_t)y * b.pitch, 0, (size_t)b.width * 4);
+                black[idx] = false;
+            }
             for (auto &r : regions_) {
                 for (int y = r.y; y < r.y + r.h; y++)
                     memcpy((uint8_t *)b.map + (size_t)y * b.pitch + r.x * 4, canvas.ptr(y) + r.x * 4,
@@ -299,10 +324,15 @@ void Display::paint(cv::Mat &canvas)
             snprintf(lbl, sizeof(lbl), "%s %.2f", d.name.c_str(), d.score);
             cv::Point o = P(d.x1, d.y1) + cv::Point(4, 22);
             cv::putText(canvas, lbl, o, cv::FONT_HERSHEY_SIMPLEX, fs * 0.7, col, 2, cv::LINE_AA);
+            if (!d.text.empty())  // plate text, emotion, head angles (ASCII)
+                text_with_bg(canvas, d.text, P(d.x1, d.y2) + cv::Point(4, 30), fs * 0.8, kWhite);
+            if (!d.pts.empty())
+                draw_points(canvas, cv::Rect(r.x, r.y, r.w, r.h), d.pts, d.shape, kVehicle, 2);
         }
 
         char info[64];
-        snprintf(info, sizeof(info), "CAM%d  %.1f fps", c, g_state.cams[c].fps);
+        snprintf(info, sizeof(info), "CAM%d  %.1f fps  %.0f ms", c, g_state.cams[c].fps,
+                 g_state.cams[c].infer_ms + g_state.cams[c].post_ms);
         cv::putText(canvas, info, cv::Point(r.x + 8, r.y + r.h - 12), cv::FONT_HERSHEY_SIMPLEX, fs * 0.7,
                     kWhite, 2, cv::LINE_AA);
     }
@@ -311,7 +341,28 @@ void Display::paint(cv::Mat &canvas)
     if (total > 0)
         top += "   FREE " + std::to_string(free_n) + " / " + std::to_string(total);
     top += "   " + ip_line;
+    if (!g_state.model_id.empty())
+        top += "   " + g_state.model_id;
+    if (g_state.trigger_mode) {
+        std::string cls;
+        for (auto &c : cfg.trigger_classes)
+            cls += (cls.empty() ? "" : ",") + c;
+        top += "   TRIGGER " + cls + " x" + std::to_string(g_state.trigger_count);
+    }
     text_with_bg(canvas, top, cv::Point(12, bar - 14), fs, kWhite);
+    if (g_state.rec_started_ms) {  // recording: red dot + time, top right
+        int s = (int)((util::mono_ms() - g_state.rec_started_ms) / 1000);
+        char rec[32];
+        snprintf(rec, sizeof(rec), "REC %02d:%02d", s / 60, s % 60);
+        int base = 0;
+        cv::Size sz = cv::getTextSize(rec, cv::FONT_HERSHEY_SIMPLEX, fs, 2, &base);
+        cv::Point org(W - sz.width - 16, bar - 14);
+        canvas(cv::Rect(org.x - bar, 0, sz.width + bar + 16, bar)).setTo(cv::Scalar(0, 0, 0, 160));
+        if ((util::mono_ms() / 500) % 2)  // blinking dot
+            cv::circle(canvas, cv::Point(org.x - bar / 2, bar / 2), bar / 4, cv::Scalar(40, 40, 230, 255), cv::FILLED,
+                       cv::LINE_AA);
+        cv::putText(canvas, rec, org, cv::FONT_HERSHEY_SIMPLEX, fs, cv::Scalar(255, 255, 255, 255), 2, cv::LINE_AA);
+    }
 
     if (!g_state.toast.empty() && util::mono_ms() < g_state.toast_until_ms && text_.ok()) {
         int px = bar;

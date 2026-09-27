@@ -66,6 +66,19 @@ bool read_file(const std::string &path, std::string &out)
     return true;
 }
 
+void defrag_memory()
+{
+    sync();
+    static const char *const kv[][2] = {{"/proc/sys/vm/drop_caches", "3\n"}, {"/proc/sys/vm/compact_memory", "1\n"}};
+    for (auto &e : kv) {
+        FILE *fp = fopen(e[0], "w");
+        if (fp) {
+            fputs(e[1], fp);
+            fclose(fp);
+        }
+    }
+}
+
 bool write_file_atomic(const std::string &path, const std::string &data)
 {
     std::string tmp = path + ".tmp";

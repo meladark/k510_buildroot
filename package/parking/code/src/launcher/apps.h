@@ -11,7 +11,8 @@
 //   cwd=/app/parking
 //   desc=YOLOv5 on both cameras, parking spots, web UI on :80
 //   env=NAME=value            (optional, may repeat)
-//   action_url=http://127.0.0.1/api/photos/capture   (optional, POSTed on the action key)
+//   action_url=http://127.0.0.1/api/action         (optional, POSTed on a short press of the action key)
+//   action_long_url=http://127.0.0.1/api/video/toggle  (optional, POSTed when it is held)
 // Files are read from /app/launcher/apps (shipped) and /root/data/apps (user).
 struct App {
     std::string id;    // file name without .conf
@@ -21,6 +22,8 @@ struct App {
     std::vector<std::string> argv;
     std::vector<std::string> env;  // NAME=value
     std::string action_url;
+    std::string action_long_url;
+    std::string config;  // settings file the touch menu edits (empty: none)
 };
 
 std::vector<App> load_apps();

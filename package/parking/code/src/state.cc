@@ -8,6 +8,7 @@
 using namespace rapidjson;
 
 AppState g_state;
+std::string g_config_path = CONFIG_PATH;
 std::atomic<bool> g_quit(false);
 
 static std::string str_list_json(const std::vector<std::string> &v)
@@ -41,6 +42,10 @@ std::string Config::to_json() const
              "  \"jpeg_quality\": %d,\n"
              "  \"keep_raw\": %s,\n"
              "  \"min_free_pct\": %.1f,\n"
+             "  \"video_max_min\": %d,\n"
+             "  \"trigger_ai_cam\": %d,\n"
+             "  \"trigger_video_s\": %d,\n"
+             "  \"trigger_confirm\": %d,\n"
              "  \"web_port\": %d,\n"
              "  \"ap_ssid\": \"%s\",\n"
              "  \"ap_psk\": \"%s\",\n"
@@ -48,11 +53,12 @@ std::string Config::to_json() const
              util::json_escape(model).c_str(), net_len, obj_thresh, nms_thresh,
              cam_enabled[0] ? "true" : "false", cam_enabled[1] ? "true" : "false",
              occupancy_threshold, footprint, debounce, ai_fps, photo_interval_min, photo_width,
-             photo_height, jpeg_quality, keep_raw ? "true" : "false", min_free_pct, web_port, util::json_escape(ap_ssid).c_str(),
+             photo_height, jpeg_quality, keep_raw ? "true" : "false", min_free_pct, video_max_min, trigger_ai_cam, trigger_video_s, trigger_confirm, web_port, util::json_escape(ap_ssid).c_str(),
              util::json_escape(ap_psk).c_str(), ap_timeout_s);
     std::string o = buf;
     o += "  \"vehicle_classes\": " + str_list_json(vehicle_classes) + ",\n";
-    o += "  \"draw_classes\": " + str_list_json(draw_classes) + "\n}\n";
+    o += "  \"draw_classes\": " + str_list_json(draw_classes) + ",\n";
+    o += "  \"trigger_classes\": " + str_list_json(trigger_classes) + "\n}\n";
     return o;
 }
 
@@ -84,6 +90,10 @@ bool Config::from_json(const std::string &json, std::string *err)
     if (d.HasMember("keep_raw") && d["keep_raw"].IsBool())
         c.keep_raw = d["keep_raw"].GetBool();
     GET_NUM(min_free_pct);
+    GET_INT(video_max_min);
+    GET_INT(trigger_ai_cam);
+    GET_INT(trigger_video_s);
+    GET_INT(trigger_confirm);
     GET_INT(web_port);
     GET_STR(ap_ssid);
     GET_STR(ap_psk);
@@ -107,13 +117,16 @@ bool Config::from_json(const std::string &json, std::string *err)
     };
     get_list("vehicle_classes", c.vehicle_classes);
     get_list("draw_classes", c.draw_classes);
+    get_list("trigger_classes", c.trigger_classes);
 
     if (c.photo_interval_min < 0 || c.photo_interval_min > 1440 || c.debounce < 1 || c.ai_fps < 0 || c.ai_fps > 30 ||
         c.occupancy_threshold <= 0 || c.occupancy_threshold > 1 || c.footprint <= 0 ||
         c.footprint > 1 || c.jpeg_quality < 10 || c.jpeg_quality > 100 ||
         (c.photo_width & 15) || (c.photo_height & 1) || c.photo_width < 320 ||
         c.photo_width > 1920 || c.photo_height < 240 || c.photo_height > 1080 ||
-        c.ap_psk.size() < 8) {
+        c.ap_psk.size() < 8 || c.video_max_min < 1 || c.video_max_min > 120 ||
+        c.trigger_ai_cam < 0 || c.trigger_ai_cam >= NUM_CAMS || c.trigger_video_s < 30 || c.trigger_video_s > 600 ||
+        c.trigger_confirm < 1 || c.trigger_confirm > 30) {
         if (err)
             *err = "value out of range";
         return false;

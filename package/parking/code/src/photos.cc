@@ -11,6 +11,7 @@
 
 #include "spots.h"
 #include "util.h"
+#include "video.h"
 
 bool valid_day(const std::string &d)
 {
@@ -123,7 +124,7 @@ static std::string spots_json(const std::vector<Spot> &spots, int cam)
 
 // One photo = all running cameras stacked vertically (cam0 on top). With AI on,
 // the stacked image shows boxes and spots; clean frames go to raw/ for training.
-std::string Photos::capture(const std::string &reason)
+std::string Photos::capture(const std::string &reason, int dets_cam, const std::vector<Detection> *dets_override)
 {
     std::lock_guard<std::mutex> cap_lk(capture_mtx_);
     cv::Mat frames[NUM_CAMS];
@@ -163,6 +164,8 @@ std::string Photos::capture(const std::string &reason)
             ai[c] = g_state.cams[c].running;
         }
     }
+    if (dets_override && dets_cam >= 0 && dets_cam < NUM_CAMS)
+        dets[dets_cam] = *dets_override;
     std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, cfg.jpeg_quality};
 
     // clean frames for labelling / training
@@ -235,6 +238,15 @@ void Photos::enforce_free_space()
     {
         std::lock_guard<std::mutex> lk(g_state.mtx);
         min_free = g_state.cfg.min_free_pct;
+    }
+    // videos first: they take the most space
+    auto vdays = util::list_dir(VIDEOS_DIR);
+    std::sort(vdays.begin(), vdays.end());
+    for (size_t i = 0; i < vdays.size() && util::free_space_pct(PHOTOS_DIR) < min_free; i++) {
+        if (!valid_day(vdays[i]) || (i + 1 == vdays.size() && g_state.rec_started_ms))
+            continue;  // not the folder being recorded into
+        fprintf(stderr, "photos: low space, removing videos %s\n", vdays[i].c_str());
+        util::remove_tree(std::string(VIDEOS_DIR) + "/" + vdays[i]);
     }
     auto list = days();
     // keep at least today's folder

@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
@@ -136,12 +137,12 @@ int video_pipeline_init(const std::string &base_conf, const Config &cfg, const C
         Pointer(key(v + 2, "width").c_str()).Set(root, cfg.photo_width);
         Pointer(key(v + 2, "height").c_str()).Set(root, cfg.photo_height);
         Pointer(key(v + 2, "out_format").c_str()).Set(root, 1);
-        // ds2: AI input, planar RGB in a net_len x net_len buffer
+        // ds2: AI input, planar RGB in a net_w x net_h buffer
         Pointer(key(v + 3, "used").c_str()).Set(root, channel_disabled("ai", c) ? 0 : 1);
         Pointer(key(v + 3, "width").c_str()).Set(root, ai.valid_w);
-        Pointer(key(v + 3, "height").c_str()).Set(root, ai.net_len);
+        Pointer(key(v + 3, "height").c_str()).Set(root, ai.net_h);
         Pointer(key(v + 3, "height_r").c_str()).Set(root, ai.valid_h);
-        Pointer(key(v + 3, "pitch").c_str()).Set(root, ai.net_len);
+        Pointer(key(v + 3, "pitch").c_str()).Set(root, ai.net_w);
         Pointer(key(v + 3, "out_format").c_str()).Set(root, 0);
     }
     StringBuffer sb;
@@ -279,7 +280,7 @@ int DisplayCam::queue(int idx)
 
 // ---------------------------------------------------------------------------
 
-int MmapCam::open(const char *node, uint32_t fourcc, int w, int h, int nbufs)
+int MmapCam::open(const char *node, uint32_t fourcc, int w, int h, int nbufs, bool shm)
 {
     std::lock_guard<std::mutex> lk(g_v4l2_mtx);
     dev_ = v4l2_open(node);
@@ -290,9 +291,34 @@ int MmapCam::open(const char *node, uint32_t fourcc, int w, int h, int nbufs)
     fmt.pixelformat = fourcc;
     fmt.width = w;
     fmt.height = h;
-    if (v4l2_set_format(dev_, &fmt) < 0 || v4l2_alloc_buffers(dev_, V4L2_MEMORY_MMAP, nbufs) < 0) {
+    if (v4l2_set_format(dev_, &fmt) < 0 ||
+        v4l2_alloc_buffers(dev_, shm ? V4L2_MEMORY_USERPTR : V4L2_MEMORY_MMAP, nbufs) < 0) {
         fprintf(stderr, "%s: format/buffers failed\n", node);
         return -1;
+    }
+    if (shm) {
+        // our own buffers in the shared pool, like the stock encode_app
+        shm_fd_ = ::open("/dev/k510-share-memory", O_RDWR);
+        mem_fd_ = ::open("/dev/mem", O_RDWR | O_SYNC);
+        if (shm_fd_ < 0 || mem_fd_ < 0)
+            return -1;
+        for (unsigned i = 0; i < dev_->nbufs; i++) {
+            struct {
+                uint32_t size, alignment, phys;
+            } a = {(dev_->buffers[i].size + 4095u) & ~4095u, 4096, 0};
+            if (ioctl(shm_fd_, _IOWR('m', 2, unsigned long), &a) < 0) {
+                fprintf(stderr, "%s: no shared memory for %u bytes\n", node, a.size);
+                return -1;
+            }
+            void *v = mmap(nullptr, a.size, PROT_READ | PROT_WRITE, MAP_SHARED, mem_fd_, a.phys);
+            phys_.push_back(a.phys);
+            maps_.push_back(v == MAP_FAILED ? nullptr : v);
+            sizes_.push_back(a.size);
+            if (v == MAP_FAILED)
+                return -1;
+            dev_->buffers[i].mem = v;
+            dev_->buffers[i].size = a.size;
+        }
     }
     for (unsigned i = 0; i < dev_->nbufs; i++) {
         struct v4l2_video_buffer b = dev_->buffers[i];
@@ -316,6 +342,19 @@ void MmapCam::close()
     v4l2_free_buffers(dev_);
     v4l2_close(dev_);
     dev_ = nullptr;
+    for (size_t i = 0; i < phys_.size(); i++) {
+        if (maps_[i])
+            munmap(maps_[i], sizes_[i]);
+        ioctl(shm_fd_, _IOWR('m', 3, unsigned long), &phys_[i]);
+    }
+    phys_.clear();
+    maps_.clear();
+    sizes_.clear();
+    if (shm_fd_ >= 0)
+        ::close(shm_fd_);
+    if (mem_fd_ >= 0)
+        ::close(mem_fd_);
+    shm_fd_ = mem_fd_ = -1;
 }
 
 int MmapCam::fd() const
@@ -356,7 +395,8 @@ int PhotoCam::start(int cam, int w, int h)
     cam_ = cam;
     w_ = w;
     h_ = h;
-    if (cap_.open(kNodes[cam][2], V4L2_PIX_FMT_NV12, w, h, 3) < 0)
+    // 4 buffers in shared memory: one may sit in the video encoder
+    if (cap_.open(kNodes[cam][2], V4L2_PIX_FMT_NV12, w, h, 4, true) < 0)
         return -1;
     running_ = true;
     th_ = std::thread(&PhotoCam::loop, this);
@@ -373,12 +413,23 @@ void PhotoCam::stop()
     cap_.close();
 }
 
+void PhotoCam::set_sink(std::function<void(const Nv12Frame &)> fn)
+{
+    std::lock_guard<std::mutex> lk(sink_m_);
+    sink_ = std::move(fn);
+}
+
 void PhotoCam::loop()
 {
     const size_t need = (size_t)w_ * h_ * 3 / 2;
     while (running_ && !g_quit.load()) {
         // Keep dequeuing so the next snapshot is always fresh; copy only on request.
-        int r = cap_.grab(1000, [&](void *mem, unsigned len) {
+        int r = cap_.grab_phys(1000, [&](void *mem, unsigned len, uint32_t phys) {
+            {
+                std::lock_guard<std::mutex> lk(sink_m_);
+                if (sink_ && len >= need)
+                    sink_(Nv12Frame{(const uint8_t *)mem, phys, w_, h_, w_, util::mono_ms()});
+            }
             std::lock_guard<std::mutex> lk(m_);
             if (want_ > 0 && len >= need) {
                 last_nv12_.create(h_ * 3 / 2, w_, CV_8UC1);

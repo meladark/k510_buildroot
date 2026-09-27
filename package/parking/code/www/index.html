@@ -8,14 +8,16 @@
 </head>
 <body>
 <header>
-  <h1>K510 Парковка</h1>
+  <h1 id="app-title">K510 Парковка</h1>
   <div id="summary" class="summary">…</div>
   <a id="apps-link" class="summary" href="#">Приложения ↗</a>
 </header>
 <nav>
   <button data-tab="status" class="active">Статус</button>
-  <button data-tab="spots">Места</button>
+  <button data-tab="spots" class="parking-only">Места</button>
   <button data-tab="photos">Фото</button>
+  <button data-tab="videos">Видео</button>
+  <button data-tab="models">Модели</button>
   <button data-tab="net">Сеть</button>
   <button data-tab="settings">Настройки</button>
 </nav>
@@ -25,12 +27,15 @@
 <!-- STATUS -->
 <section id="tab-status">
   <div class="cams" id="status-cams"></div>
+  <div class="card trigger-only" id="trg-state"></div>
+  <div class="parking-only">
   <h2>Места</h2>
   <p class="hint">Если система ошиблась — нажмите правильный вариант. Это сохранится как разметка вместе с фото для дообучения.</p>
   <table class="spots-table">
     <thead><tr><th>Место</th><th>Камера</th><th>Статус</th><th>Перекрытие</th><th>С</th><th>Исправить</th></tr></thead>
     <tbody id="spots-body"></tbody>
   </table>
+  </div>
 </section>
 
 <!-- SPOT EDITOR -->
@@ -64,6 +69,17 @@
   <div id="ph-grid" class="grid"></div>
 </section>
 
+<!-- VIDEOS -->
+<section id="tab-videos" class="hidden">
+  <div class="toolbar">
+    <button id="vd-rec" class="primary">● Начать запись</button>
+    <span id="vd-state" class="hint"></span>
+  </div>
+  <p class="hint">На плате: удерживать кнопку фото 1 секунду — запись, короткое нажатие — стоп.
+    Каждая камера пишется в свой MP4 (H.264), запись сама останавливается через лимит из настроек.</p>
+  <div id="vd-list"></div>
+</section>
+
 <!-- NETWORK -->
 <section id="tab-net" class="hidden">
   <div id="net-status" class="card"></div>
@@ -75,6 +91,19 @@
     <label class="inline"><input type="checkbox" id="net-show"> показать</label>
     <button type="submit" class="primary">Подключиться</button>
   </form>
+</section>
+
+<!-- MODELS -->
+<section id="tab-models" class="hidden">
+  <div id="md-current" class="card"></div>
+  <p class="hint">Время — на один кадр одной камеры. Сравнение моделей на одном снимке: на плате остановить приложение
+    (меню → любое другое) и выполнить <code>/app/parking/parking --bench</code>; результаты появятся здесь.</p>
+  <table class="spots-table" id="md-table">
+    <thead><tr><th>Модель и что распознаёт</th><th>Размер</th><th>KPU, мс</th><th>CPU, мс</th><th>Макс. к/с</th><th>Нашла</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <h2 id="md-bench-title" class="hidden">Сравнение на одном снимке</h2>
+  <div id="md-bench" class="grid"></div>
 </section>
 
 <!-- SETTINGS -->
@@ -90,7 +119,16 @@
       <label>Классы-машины (через запятую) <input type="text" name="vehicle_classes"></label>
       <label>Показывать на экране только классы (пусто = все) <input type="text" name="draw_classes"></label>
     </fieldset>
-    <fieldset><legend>Парковочные места</legend>
+    <fieldset class="trigger-only"><legend>Триггер</legend>
+      <label>Камера с нейросетью (другая пишет видео) <select name="trigger_ai_cam">
+        <option value="0">Камера 0</option><option value="1">Камера 1</option></select></label>
+      <label>На кого срабатывать (классы через запятую: cat, dog, person, car, bird…) <input type="text" name="trigger_classes"></label>
+      <label>Длина видео <select name="trigger_video_s">
+        <option value="30">30 секунд</option><option value="60">1 минута</option><option value="120">2 минуты</option>
+        <option value="300">5 минут</option><option value="600">10 минут</option></select></label>
+      <label>Подтверждение, кадров ИИ подряд <input type="number" min="1" max="30" name="trigger_confirm"></label>
+    </fieldset>
+    <fieldset class="parking-only"><legend>Парковочные места</legend>
       <label>Порог занятости (доля места под машиной) <input type="number" step="0.05" min="0.05" max="1" name="occupancy_threshold"></label>
       <label>«След» машины — нижняя доля рамки <input type="number" step="0.05" min="0.1" max="1" name="footprint"></label>
       <label>Подтверждение смены статуса, кадров <input type="number" min="1" max="100" name="debounce"></label>
@@ -105,6 +143,7 @@
       <label>Качество JPEG <input type="number" min="10" max="100" name="jpeg_quality"></label>
       <label class="inline"><input type="checkbox" name="keep_raw"> Сохранять чистые кадры без рамок (raw/, для обучения)</label>
       <label>Минимум свободного места на SD, % <input type="number" min="1" max="90" name="min_free_pct"></label>
+      <label>Максимальная длина видео, минут <input type="number" min="1" max="120" name="video_max_min"></label>
     </fieldset>
     <div class="toolbar">
       <button type="submit" class="primary">Сохранить</button>

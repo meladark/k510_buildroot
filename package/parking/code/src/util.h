@@ -13,6 +13,11 @@ bool clock_is_sane();             // false while the clock still sits at the 201
 
 bool read_file(const std::string &path, std::string &out);
 bool write_file_atomic(const std::string &path, const std::string &data);
+// Drops the page cache and compacts memory. The display driver allocates its
+// frame buffers as physically contiguous 8 MB blocks from normal memory (no
+// CMA on this kernel); after a while page cache fragments it and DRM dumb
+// buffer creation fails, i.e. a blank screen. Call before allocating them.
+void defrag_memory();
 bool mkdirs(const std::string &path);
 bool is_dir(const std::string &path);
 std::vector<std::string> list_dir(const std::string &path);  // sorted names, no . and ..
